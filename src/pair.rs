@@ -85,12 +85,31 @@ impl Pairing {
     }
 }
 
+/// The session bus address: from our environment, else borrowed from another process of ours
+/// (a daemon started from init or ssh doesn't inherit it from the desktop session).
+fn session_bus() -> Option<String> {
+    if let Ok(a) = std::env::var("DBUS_SESSION_BUS_ADDRESS") {
+        return Some(a);
+    }
+    for e in std::fs::read_dir("/proc").ok()?.flatten() {
+        if !e.file_name().to_str().is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit())) {
+            continue;
+        }
+        let Ok(env) = std::fs::read(e.path().join("environ")) else { continue };
+        for kv in env.split(|&b| b == 0) {
+            if let Some(v) = kv.strip_prefix(b"DBUS_SESSION_BUS_ADDRESS=") {
+                return String::from_utf8(v.to_vec()).ok();
+            }
+        }
+    }
+    None
+}
+
 fn notify(code: &str, device: &str) {
-    let uid = unsafe { libc::getuid() };
     let mut c = std::process::Command::new("notify-send");
     c.args(["-u", "critical", "-a", "homectl", "homectl pairing", &format!("Code {code} for {device}")]);
-    if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
-        c.env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path=/run/user/{uid}/bus"));
+    if let Some(addr) = session_bus() {
+        c.env("DBUS_SESSION_BUS_ADDRESS", addr);
     }
     let _ = c.spawn().map(|mut ch| std::thread::spawn(move || ch.wait()));
 }

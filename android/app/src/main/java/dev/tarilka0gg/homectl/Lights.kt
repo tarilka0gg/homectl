@@ -1,0 +1,72 @@
+package dev.tarilka0gg.homectl
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import org.json.JSONArray
+
+private val presets = listOf(
+    "Warm" to Triple(255, 244, 229),
+    "Cool" to Triple(201, 226, 255),
+    "Red" to Triple(255, 0, 0),
+    "Green" to Triple(0, 255, 0),
+    "Blue" to Triple(0, 0, 255),
+    "Purple" to Triple(160, 0, 255),
+)
+
+@Composable
+fun LightsScreen() {
+    var nonce by remember { mutableIntStateOf(0) }
+    var rescan by remember { mutableIntStateOf(0) }
+    val lights = loaded(nonce to rescan, 5000) { Hc.array(if (rescan > 0) "/api/lights?rescan=1" else "/api/lights") }
+    val scope = rememberCoroutineScope()
+    fun act(block: suspend () -> Unit) = scope.launch { block(); delay(700); nonce++ }
+
+    val list = lights.value?.objs().orEmpty()
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Text("Lights", style = MaterialTheme.typography.titleLarge)
+        IconButton({ rescan++ }) { Icon(Icons.Default.Refresh, "Rescan") }
+    }
+    if (lights.value == null) Text("Scanning…") else if (list.isEmpty()) {
+        Text("None found. Enable \"LAN Control\" for each light in the Govee app.", style = MaterialTheme.typography.bodyMedium)
+    }
+    if (list.size > 1) Section("All lights") {
+        SwitchRow("Everything", list.any { it.optBoolean("on") }, "${list.count { it.optBoolean("on") }} of ${list.size} on") { on ->
+            act { list.forEach { Hc.post("/api/lights/${it.str("ip")}", body("on" to on)) } }
+        }
+    }
+    list.forEachIndexed { i, l ->
+        val ip = l.str("ip")
+        val on = l.optBoolean("on")
+        val rgb = l.optJSONArray("rgb")?.let { a -> Triple(a.optInt(0), a.optInt(1), a.optInt(2)) }
+        Section("Light ${i + 1}  ·  ${l.str("sku")}", trailing = {
+            rgb?.let { Box(Modifier.size(22.dp).clip(CircleShape).background(if (on) Color(it.first, it.second, it.third) else Color.Gray)) }
+        }) {
+            SwitchRow(if (on) "On" else "Off", on, ip) { v -> act { Hc.post("/api/lights/$ip", body("on" to v)) } }
+            SliderRow("Brightness", l.optInt("brightness", 100).toFloat(), 100f, 1f, enabled = on) { b -> act { Hc.post("/api/lights/$ip", body("brightness" to b)) } }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                presets.forEach { (_, c) ->
+                    val selected = rgb == c
+                    Box(
+                        Modifier.size(40.dp).clip(CircleShape).background(Color(c.first, c.second, c.third))
+                            .then(if (selected) Modifier.border(3.dp, MaterialTheme.colorScheme.primary, CircleShape) else Modifier)
+                            .clickable { act { Hc.post("/api/lights/$ip", body("on" to true, "rgb" to JSONArray(listOf(c.first, c.second, c.third)))) } },
+                    )
+                }
+            }
+        }
+    }
+}

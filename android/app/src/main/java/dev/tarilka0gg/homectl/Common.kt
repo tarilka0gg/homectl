@@ -1,0 +1,142 @@
+package dev.tarilka0gg.homectl
+
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
+import org.json.JSONArray
+import org.json.JSONObject
+
+fun body(vararg p: Pair<String, Any>) = JSONObject().apply { p.forEach { put(it.first, it.second) } }
+
+fun JSONArray.floats(): List<Float> = (0 until length()).map { getDouble(it).toFloat() }
+fun JSONArray.objs(): List<JSONObject> = (0 until length()).map { getJSONObject(it) }
+fun JSONObject.str(k: String): String = if (isNull(k)) "" else optString(k)
+
+fun fmtBytes(b: Double): String {
+    val u = listOf("B", "KiB", "MiB", "GiB", "TiB")
+    var v = b
+    var i = 0
+    while (v >= 1024 && i < u.size - 1) { v /= 1024; i++ }
+    return if (i == 0) "${v.toInt()} B" else "%.1f %s".format(v, u[i])
+}
+
+fun fmtRate(b: Double) = fmtBytes(b) + "/s"
+
+fun fmtUptime(s: Long): String {
+    val d = s / 86400
+    val h = s % 86400 / 3600
+    val m = s % 3600 / 60
+    return if (d > 0) "${d}d ${h}h" else if (h > 0) "${h}h ${m}m" else "${m}m"
+}
+
+/** green → yellow → red like btop's meters. */
+fun heat(percent: Float): Color = Color.hsv(120f * (1f - (percent / 100f).coerceIn(0f, 1f)), 0.65f, 0.85f)
+
+@Composable
+fun Section(title: String, trailing: (@Composable () -> Unit)? = null, content: @Composable ColumnScope.() -> Unit) {
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                trailing?.invoke()
+            }
+            content()
+        }
+    }
+}
+
+@Composable
+fun SliderRow(label: String, value: Float, max: Float = 100f, min: Float = 0f, enabled: Boolean = true, onDone: (Int) -> Unit) {
+    var v by remember { mutableFloatStateOf(value) }
+    var dragging by remember { mutableStateOf(false) }
+    LaunchedEffect(value) { if (!dragging) v = value }
+    Column {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(label, style = MaterialTheme.typography.bodyMedium)
+            Text(v.toInt().toString(), style = MaterialTheme.typography.labelLarge)
+        }
+        Slider(v, { dragging = true; v = it }, enabled = enabled, valueRange = min..max, onValueChangeFinished = { dragging = false; onDone(v.toInt()) })
+    }
+}
+
+/** A switch that follows the real state: it flips immediately and is corrected by the next refresh. */
+@Composable
+fun SwitchRow(label: String, checked: Boolean, sub: String? = null, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
+    var local by remember(checked) { mutableStateOf(checked) }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+        Column(Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyLarge)
+            if (sub != null) Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(local, { local = it; onChange(it) }, enabled = enabled)
+    }
+}
+
+/** Loads on entry and whenever [key] or the selected machine changes; polls every [everyMs] if > 0. */
+@Composable
+fun <T> loaded(key: Any?, everyMs: Long = 0, fetch: suspend () -> T?): State<T?> {
+    val mid = Hc.cur?.id
+    val s = remember(mid) { mutableStateOf<T?>(null) }
+    LaunchedEffect(key, mid) {
+        do {
+            fetch()?.let { s.value = it }
+            if (everyMs > 0) delay(everyMs)
+        } while (everyMs > 0)
+    }
+    return s
+}
+
+@Composable
+fun Bar(fraction: Float, color: Color, modifier: Modifier = Modifier, height: Dp = 8.dp) {
+    Box(modifier.fillMaxWidth().height(height).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(height))) {
+        Box(Modifier.fillMaxWidth(fraction.coerceIn(0f, 1f)).fillMaxHeight().background(color, RoundedCornerShape(height)))
+    }
+}
+
+/** Line chart of the last samples; several series share one scale. */
+@Composable
+fun Spark(series: List<List<Float>>, colors: List<Color>, modifier: Modifier = Modifier, max: Float? = null, height: Dp = 56.dp) {
+    val track = MaterialTheme.colorScheme.surfaceVariant
+    Canvas(modifier.fillMaxWidth().height(height).background(track.copy(alpha = 0.35f), RoundedCornerShape(8.dp))) {
+        val top = max ?: (series.flatten().maxOrNull() ?: 1f).coerceAtLeast(1f)
+        series.forEachIndexed { si, vals ->
+            if (vals.size < 2) return@forEachIndexed
+            val path = Path()
+            vals.forEachIndexed { i, v ->
+                val x = size.width * i / (vals.size - 1)
+                val y = size.height - size.height * (v / top).coerceIn(0f, 1f)
+                if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            }
+            if (si == 0) {
+                val fill = Path().apply {
+                    addPath(path)
+                    lineTo(size.width, size.height)
+                    lineTo(0f, size.height)
+                    close()
+                }
+                drawPath(fill, colors[si].copy(alpha = 0.18f))
+            }
+            drawPath(path, colors[si], style = Stroke(width = 2.5f))
+        }
+    }
+}
+
+@Composable
+fun Legend(label: String, color: Color) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Box(Modifier.size(10.dp).background(color, RoundedCornerShape(3.dp)))
+        Text(label, style = MaterialTheme.typography.labelMedium)
+    }
+}
