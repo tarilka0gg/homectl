@@ -1,0 +1,31 @@
+<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>homectl</title>
+<style>
+:root{color-scheme:dark light}body{font:16px system-ui;margin:0;padding:16px;max-width:560px;margin:auto}
+section{border:1px solid #8884;border-radius:12px;padding:12px;margin:12px 0}h2{margin:0 0 8px;font-size:1rem}
+input[type=range]{width:100%}button{padding:8px 14px;border-radius:8px;border:1px solid #8886;margin:2px}
+</style>
+<h1>homectl</h1>
+<section><h2>System</h2><pre id="stats">…</pre></section>
+<section><h2>Screen brightness</h2><input id="bri" type="range" min="1" max="100"></section>
+<section><h2>Lights</h2><div id="lights">scanning…</div></section>
+<section><h2>Send file</h2><input id="file" type="file"><button id="send">Send</button></section>
+<script>
+let token=localStorage.token||prompt("homectl token");localStorage.token=token;
+const api=(p,o={})=>fetch("/api"+p,{...o,headers:{...o.headers,Authorization:"Bearer "+token}});
+const post=(p,b)=>api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)});
+async function refresh(){const r=await api("/stats");if(r.status==401){localStorage.removeItem("token");location.reload()}
+ const s=await r.json();stats.textContent=`${s.hostname}\nup ${(s.uptime_s/3600).toFixed(1)}h  load ${s.load.join(" ")}\nmem ${((s.mem_total_kb-s.mem_available_kb)/1048576).toFixed(1)} / ${(s.mem_total_kb/1048576).toFixed(1)} GiB`}
+refresh();setInterval(refresh,5000);
+api("/brightness").then(r=>r.json()).then(b=>bri.value=b.percent||50);
+bri.onchange=()=>post("/brightness",{percent:+bri.value});
+api("/lights").then(r=>r.json()).then(ls=>{lights.innerHTML=ls.length?"":"none found (enable LAN Control in Govee app)";
+ for(const l of ls){const d=document.createElement("div");d.innerHTML=`${l.sku} ${l.ip} <button>on</button><button>off</button> <input type=range min=1 max=100> <input type=color>`;
+  const [on,off]=d.querySelectorAll("button"),[br,col]=d.querySelectorAll("input");
+  on.onclick=()=>post("/lights/"+l.ip,{on:true});off.onclick=()=>post("/lights/"+l.ip,{on:false});
+  br.onchange=()=>post("/lights/"+l.ip,{brightness:+br.value});
+  col.onchange=()=>{const h=col.value;post("/lights/"+l.ip,{rgb:[1,3,5].map(i=>parseInt(h.substr(i,2),16))})};
+  lights.append(d)}});
+send.onclick=async()=>{const f=file.files[0];if(f)await api("/files/"+encodeURIComponent(f.name),{method:"POST",body:f});alert("sent")};
+</script>
