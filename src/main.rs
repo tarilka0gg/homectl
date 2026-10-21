@@ -1,5 +1,6 @@
 mod ctl;
 mod govee;
+mod net;
 mod sys;
 
 use axum::{
@@ -12,11 +13,17 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{atomic::{AtomicU32, Ordering}, Arc},
+};
 
 struct App {
     token: String,
     inbox: PathBuf,
+    port: u16,
+    tunnel: net::TunnelUrl,
+    failures: AtomicU32,
 }
 
 type S = State<Arc<App>>;
@@ -44,18 +51,35 @@ fn load_token() -> String {
     token
 }
 
+/// Compares without short-circuiting so response time doesn't leak how much of the token matched.
+fn token_eq(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 async fn auth(State(app): S, req: Request, next: Next) -> Response {
     let ok = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|t| t == app.token);
+        .is_some_and(|t| token_eq(t, &app.token));
     if ok {
+        app.failures.store(0, Ordering::Relaxed);
         next.run(req).await
     } else {
+        // The tunnel makes this reachable from the internet: slow down guessing as failures pile up.
+        let n = app.failures.fetch_add(1, Ordering::Relaxed).min(20);
+        tokio::time::sleep(std::time::Duration::from_millis(100 * n as u64)).await;
         StatusCode::UNAUTHORIZED.into_response()
     }
+}
+
+async fn ping() -> impl IntoResponse {
+    Json(serde_json::json!({ "homectl": 1 }))
+}
+
+async fn endpoints(State(app): S) -> impl IntoResponse {
+    Json(net::endpoints(app.port, &app.tunnel).await)
 }
 
 async fn stats() -> impl IntoResponse {
@@ -191,11 +215,21 @@ async fn index() -> Html<&'static str> {
 #[tokio::main]
 async fn main() {
     let addr = std::env::var("HOMECTL_ADDR").unwrap_or_else(|_| "0.0.0.0:7878".into());
+    let port: u16 = addr.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(7878);
+    let token = load_token();
+    if std::env::args().nth(1).as_deref() == Some("pair") {
+        return net::pair(port, &token).await;
+    }
     let inbox = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join("homectl-inbox");
     std::fs::create_dir_all(&inbox).expect("create inbox");
-    let app = Arc::new(App { token: load_token(), inbox });
+    let tunnel: net::TunnelUrl = Default::default();
+    if std::env::var("HOMECTL_TUNNEL").is_ok_and(|v| v == "quick") {
+        net::spawn_tunnel(port, tunnel.clone());
+    }
+    let app = Arc::new(App { token, inbox, port, tunnel, failures: AtomicU32::new(0) });
 
     let api = Router::new()
+        .route("/endpoints", get(endpoints))
         .route("/stats", get(stats))
         .route("/brightness", get(get_brightness).post(set_brightness))
         .route("/lights", get(lights))
@@ -218,7 +252,7 @@ async fn main() {
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         .with_state(app);
 
-    let router = Router::new().route("/", get(index)).nest("/api", api);
+    let router = Router::new().route("/", get(index)).route("/api/ping", get(ping)).nest("/api", api);
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
     eprintln!("homectl listening on {addr}");
     axum::serve(listener, router).await.unwrap();
