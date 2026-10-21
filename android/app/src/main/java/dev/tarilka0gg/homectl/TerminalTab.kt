@@ -63,6 +63,8 @@ object TerminalHub {
         val w = WebView(MutableContextWrapper(ctx)).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+            settings.textZoom = 100 // the page does its own sizing; the system font scale must not change cell metrics
+            settings.setSupportZoom(false)
             setBackgroundColor(0xFF0B0F14.toInt())
             addJavascriptInterface(Bridge(this, m, sid), "Android")
             webViewClient = object : WebViewClient() {
@@ -77,7 +79,7 @@ object TerminalHub {
     private fun start(w: WebView, m: Machine, sid: String) {
         scope.launch {
             if (m.active == null) m.resolve()
-            val u = m.termUrl(sid) ?: return@launch
+            val u = m.termUrl(sid, TermState.pendingShell.remove(key(m, sid))) ?: return@launch
             w.evaluateJavascript("hcStart(${JSONObject.quote(u)})", null)
         }
     }
@@ -123,6 +125,8 @@ data class Pane(val machineId: String, val sessionId: String)
 object TermState {
     private lateinit var prefs: android.content.SharedPreferences
     private val last = HashMap<String, String>()
+    /** Shell chosen for a session that doesn't exist yet (machine id/session id → path). */
+    val pendingShell = HashMap<String, String>()
     var split by mutableStateOf(false)
     var second by mutableStateOf<Pane?>(null)
     var ssh by mutableStateOf<List<String>>(emptyList())
@@ -199,11 +203,26 @@ fun TerminalScreen() {
                     FilterChip(sid == s.id, { TermState.select(m, s.id) }, label = { Text(label(shown, s)) })
                 }
                 item {
-                    AssistChip({
-                        val id = "t" + System.currentTimeMillis().toString(36)
-                        TermState.select(m, id)
-                        scope.launch { delay(1500); nonce++ }
-                    }, label = { Text("＋") })
+                    var newMenu by remember { mutableStateOf(false) }
+                    var shells by remember(m.id) { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+                    LaunchedEffect(newMenu) {
+                        if (newMenu && shells.isEmpty()) shells = m.array("/api/term/shells")?.objs()?.map { it.str("path") to it.str("name") }.orEmpty()
+                    }
+                    Box {
+                        AssistChip({ newMenu = true }, label = { Text("＋") })
+                        DropdownMenu(newMenu, { newMenu = false }) {
+                            fun create(path: String?) {
+                                val id = "t" + System.currentTimeMillis().toString(36)
+                                path?.let { TermState.pendingShell[TerminalHub.key(m, id)] = it }
+                                TermState.select(m, id)
+                                scope.launch { delay(1500); nonce++ }
+                            }
+                            DropdownMenuItem(text = { Text("New session — default shell") }, onClick = { newMenu = false; create(null) })
+                            shells.forEach { (path, name) ->
+                                DropdownMenuItem(text = { Text("New $name session") }, onClick = { newMenu = false; create(path) })
+                            }
+                        }
+                    }
                 }
             }
             IconButton({ TermState.updateSplit(!TermState.split); if (TermState.split && TermState.second == null) TermState.updateSecond(Pane(m.id, "split")) }) {
@@ -218,6 +237,14 @@ fun TerminalScreen() {
             Box {
                 IconButton({ menu = true }) { Icon(Icons.Default.MoreVert, "More") }
                 DropdownMenu(menu, { menu = false }) {
+                    var shellsHere by remember(m.id) { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+                    LaunchedEffect(menu) {
+                        if (menu && shellsHere.isEmpty()) shellsHere = m.array("/api/term/shells")?.objs()?.map { it.str("path") to it.str("name") }.orEmpty()
+                    }
+                    shellsHere.forEach { (path, name) ->
+                        DropdownMenuItem(text = { Text("Switch this session to $name") }, onClick = { menu = false; TerminalHub.send(m, sid, "exec $path\n") })
+                    }
+                    HorizontalDivider()
                     DropdownMenuItem(text = { Text("Rename session") }, onClick = { menu = false; renameDialog = true })
                     DropdownMenuItem(text = { Text("Close session") }, onClick = { menu = false; closeDialog = true })
                 }

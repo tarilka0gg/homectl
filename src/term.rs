@@ -8,7 +8,7 @@ use std::{
     ffi::{c_char, c_int, CString},
     os::fd::{AsRawFd, RawFd},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -39,16 +39,78 @@ impl AsRawFd for PtyRef {
     }
 }
 
+#[derive(Clone)]
+enum Ev {
+    Data(Vec<u8>),
+    Size(u16, u16),
+    End,
+}
+
+#[derive(Clone)]
+enum Chunk {
+    Data(Vec<u8>),
+    Size(u16, u16),
+}
+
+/// Recent output, kept together with the terminal sizes it was written at, so a client that attaches later
+/// can replay it at the right widths (and let its own terminal reflow) instead of seeing garbled wrapping.
+#[derive(Default)]
+struct Ring {
+    chunks: VecDeque<Chunk>,
+    bytes: usize,
+    base: Option<(u16, u16)>,
+}
+
+impl Ring {
+    fn push_data(&mut self, d: Vec<u8>) {
+        self.bytes += d.len();
+        self.chunks.push_back(Chunk::Data(d));
+        while self.bytes > RING {
+            match self.chunks.pop_front() {
+                Some(Chunk::Data(d)) => self.bytes -= d.len(),
+                Some(Chunk::Size(c, r)) => self.base = Some((c, r)),
+                None => break,
+            }
+        }
+    }
+    fn snapshot(&self) -> Vec<Chunk> {
+        self.base.map(|(c, r)| Chunk::Size(c, r)).into_iter().chain(self.chunks.iter().cloned()).collect()
+    }
+}
+
 pub struct Session {
     id: String,
     name: Mutex<String>,
     created: u64,
     pid: i32,
     pty: Arc<Pty>,
-    ring: Mutex<VecDeque<u8>>,
-    tx: broadcast::Sender<Option<Vec<u8>>>,
-    alive: AtomicBool,
-    clients: AtomicUsize,
+    ring: Mutex<Ring>,
+    tx: broadcast::Sender<Ev>,
+    /// What each attached client's screen can hold; the shell gets the smallest of them (like tmux).
+    clients: Mutex<HashMap<u64, (u16, u16)>>,
+    size: Mutex<(u16, u16)>,
+}
+
+static NEXT_CLIENT: AtomicU64 = AtomicU64::new(1);
+
+impl Session {
+    fn recompute(&self) {
+        let want = {
+            let c = self.clients.lock().unwrap();
+            if c.is_empty() {
+                return;
+            }
+            (c.values().map(|x| x.0).min().unwrap(), c.values().map(|x| x.1).min().unwrap())
+        };
+        let mut ring = self.ring.lock().unwrap();
+        let mut size = self.size.lock().unwrap();
+        if *size != want {
+            *size = want;
+            unsafe { hc_pty_resize(self.pty.0, want.0 as c_int, want.1 as c_int) };
+            ring.chunks.push_back(Chunk::Size(want.0, want.1));
+            let _ = self.tx.send(Ev::Size(want.0, want.1));
+        }
+    }
 }
 
 #[derive(Default)]
@@ -58,12 +120,57 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 32 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// The login shell from the passwd database (what the user actually uses), else $SHELL.
+fn login_shell() -> Option<String> {
+    let uid = unsafe { libc::getuid() }.to_string();
+    std::fs::read_to_string("/etc/passwd")
+        .unwrap_or_default()
+        .lines()
+        .find_map(|l| {
+            let f: Vec<&str> = l.split(':').collect();
+            (f.get(2) == Some(&uid.as_str())).then(|| f.get(6).map(|s| s.to_string())).flatten()
+        })
+        .or_else(|| std::env::var("SHELL").ok())
+}
+
+/// Shells a session may run: the login shell first, then everything in /etc/shells that exists
+/// (one entry per real binary, so /bin and /usr/bin aliases are not listed twice).
+pub fn shells() -> Vec<String> {
+    let mut v: Vec<String> = vec![];
+    let mut real: Vec<std::path::PathBuf> = vec![];
+    let mut add = |p: String| {
+        let Ok(c) = std::fs::canonicalize(&p) else { return };
+        if p.starts_with('/') && !real.contains(&c) {
+            real.push(c);
+            v.push(p);
+        }
+    };
+    if let Some(s) = login_shell() {
+        add(s);
+    }
+    for l in std::fs::read_to_string("/etc/shells").unwrap_or_default().lines() {
+        let l = l.trim();
+        if !l.is_empty() && !l.starts_with('#') {
+            add(l.to_string());
+        }
+    }
+    if v.is_empty() {
+        v.push("/bin/sh".into());
+    }
+    v
+}
+
+pub fn shells_json() -> Value {
+    let list = shells();
+    json!(list.iter().enumerate().map(|(i, p)| json!({"path": p, "name": p.rsplit('/').next().unwrap_or(p), "default": i == 0})).collect::<Vec<_>>())
+}
+
 impl Sessions {
     pub fn list(&self) -> Value {
         let map = self.0.lock().unwrap();
         let mut v: Vec<&Arc<Session>> = map.values().collect();
         v.sort_by_key(|s| s.created);
-        json!(v.iter().map(|s| json!({"id": s.id, "name": *s.name.lock().unwrap(), "created": s.created, "clients": s.clients.load(Ordering::Relaxed)})).collect::<Vec<_>>())
+        json!(v.iter().map(|s| json!({"id": s.id, "name": *s.name.lock().unwrap(), "created": s.created, "clients": s.clients.lock().unwrap().len()})).collect::<Vec<_>>())
     }
 
     pub fn rename(&self, id: &str, name: &str) -> bool {
@@ -75,7 +182,7 @@ impl Sessions {
         s.map(|s| unsafe { libc::kill(s.pid, libc::SIGHUP) }).is_some()
     }
 
-    fn get_or_create(self: &Arc<Self>, id: &str, cols: u16, rows: u16) -> Option<Arc<Session>> {
+    fn get_or_create(self: &Arc<Self>, id: &str, cols: u16, rows: u16, shell: Option<&str>) -> Option<Arc<Session>> {
         let mut map = self.0.lock().unwrap();
         if let Some(s) = map.get(id) {
             return Some(s.clone());
@@ -83,7 +190,9 @@ impl Sessions {
         if map.len() >= MAX_SESSIONS || !valid_id(id) {
             return None;
         }
-        let shell = CString::new(std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())).ok()?;
+        let allowed = shells();
+        let chosen = shell.filter(|s| allowed.iter().any(|a| a == s)).map_or_else(|| allowed[0].clone(), String::from);
+        let shell = CString::new(chosen).ok()?;
         let home = CString::new(std::env::var("HOME").unwrap_or_else(|_| "/".into())).ok()?;
         let mut pid: c_int = 0;
         let fd = unsafe { hc_pty_spawn(cols.max(10) as c_int, rows.max(3) as c_int, shell.as_ptr(), home.as_ptr(), &mut pid) };
@@ -98,10 +207,10 @@ impl Sessions {
             created: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()),
             pid,
             pty: pty.clone(),
-            ring: Mutex::new(VecDeque::new()),
+            ring: Mutex::new(Ring { chunks: VecDeque::from([Chunk::Size(cols.max(10), rows.max(3))]), ..Default::default() }),
             tx,
-            alive: AtomicBool::new(true),
-            clients: AtomicUsize::new(0),
+            clients: Mutex::new(HashMap::new()),
+            size: Mutex::new((cols.max(10), rows.max(3))),
         });
         map.insert(id.to_string(), s.clone());
         let (sess, reg) = (s.clone(), self.clone());
@@ -120,16 +229,13 @@ impl Sessions {
                         let data = buf[..n].to_vec();
                         // ring + broadcast under one lock, so an attaching client never misses or repeats bytes
                         let mut ring = sess.ring.lock().unwrap();
-                        ring.extend(data.iter());
-                        let excess = ring.len().saturating_sub(RING);
-                        ring.drain(..excess);
-                        let _ = sess.tx.send(Some(data));
+                        ring.push_data(data.clone());
+                        let _ = sess.tx.send(Ev::Data(data));
                     }
                     Err(_) => continue,
                 }
             }
-            sess.alive.store(false, Ordering::Relaxed);
-            let _ = sess.tx.send(None);
+            let _ = sess.tx.send(Ev::End);
             reg.0.lock().unwrap().remove(&sess.id);
             let pid = sess.pid;
             tokio::task::spawn_blocking(move || {
@@ -164,41 +270,55 @@ async fn write_all(pty: &Pty, data: &[u8]) {
     }
 }
 
-pub async fn attach(reg: Arc<Sessions>, mut ws: WebSocket, id: String, cols: u16, rows: u16) {
-    let Some(s) = reg.get_or_create(&id, cols, rows) else { return };
-    s.clients.fetch_add(1, Ordering::Relaxed);
+pub async fn attach(reg: Arc<Sessions>, mut ws: WebSocket, id: String, cols: u16, rows: u16, shell: Option<String>) {
+    let Some(s) = reg.get_or_create(&id, cols, rows, shell.as_deref()) else { return };
+    let cid = NEXT_CLIENT.fetch_add(1, Ordering::Relaxed);
+    s.clients.lock().unwrap().insert(cid, (cols.max(10), rows.max(3)));
     let (snapshot, mut rx) = {
         let ring = s.ring.lock().unwrap();
-        (ring.iter().copied().collect::<Vec<u8>>(), s.tx.subscribe())
+        (ring.snapshot(), s.tx.subscribe())
     };
-    unsafe { hc_pty_resize(s.pty.0, cols.max(10) as c_int, rows.max(3) as c_int) };
-    if !snapshot.is_empty() && ws.send(Message::Binary(snapshot.into())).await.is_err() {
-        s.clients.fetch_sub(1, Ordering::Relaxed);
-        return;
-    }
-    loop {
-        tokio::select! {
-            out = rx.recv() => match out {
-                Ok(Some(d)) => { if ws.send(Message::Binary(d.into())).await.is_err() { break } }
-                Ok(None) | Err(broadcast::error::RecvError::Closed) => { let _ = ws.send(Message::Close(None)).await; break }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            },
-            msg = ws.recv() => match msg {
-                Some(Ok(Message::Binary(b))) => write_all(&s.pty, &b).await,
-                Some(Ok(Message::Text(t))) => {
-                    if let Ok(v) = serde_json::from_str::<Value>(t.as_str()) {
-                        if let Some(a) = v["resize"].as_array() {
-                            let (c, r) = (a.first().and_then(|x| x.as_i64()).unwrap_or(80), a.get(1).and_then(|x| x.as_i64()).unwrap_or(24));
-                            unsafe { hc_pty_resize(s.pty.0, c as c_int, r as c_int) };
-                        }
-                    } else {
-                        write_all(&s.pty, t.as_str().as_bytes()).await;
-                    }
-                }
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-                _ => {}
-            },
+    let mut ok = true;
+    for ch in snapshot {
+        let m = match ch {
+            Chunk::Data(d) => Message::Binary(d.into()),
+            Chunk::Size(c, r) => Message::Text(json!({"size": [c, r]}).to_string().into()),
+        };
+        if ws.send(m).await.is_err() {
+            ok = false;
+            break;
         }
     }
-    s.clients.fetch_sub(1, Ordering::Relaxed);
+    if ok {
+        s.recompute();
+        loop {
+            tokio::select! {
+                out = rx.recv() => match out {
+                    Ok(Ev::Data(d)) => { if ws.send(Message::Binary(d.into())).await.is_err() { break } }
+                    Ok(Ev::Size(c, r)) => { if ws.send(Message::Text(json!({"size": [c, r]}).to_string().into())).await.is_err() { break } }
+                    Ok(Ev::End) | Err(broadcast::error::RecvError::Closed) => { let _ = ws.send(Message::Close(None)).await; break }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                },
+                msg = ws.recv() => match msg {
+                    Some(Ok(Message::Binary(b))) => write_all(&s.pty, &b).await,
+                    Some(Ok(Message::Text(t))) => {
+                        if let Ok(v) = serde_json::from_str::<Value>(t.as_str()) {
+                            if let Some(a) = v["resize"].as_array() {
+                                let c = a.first().and_then(|x| x.as_i64()).unwrap_or(80).clamp(10, 500) as u16;
+                                let r = a.get(1).and_then(|x| x.as_i64()).unwrap_or(24).clamp(3, 300) as u16;
+                                s.clients.lock().unwrap().insert(cid, (c, r));
+                                s.recompute();
+                            }
+                        } else {
+                            write_all(&s.pty, t.as_str().as_bytes()).await;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    _ => {}
+                },
+            }
+        }
+    }
+    s.clients.lock().unwrap().remove(&cid);
+    s.recompute();
 }

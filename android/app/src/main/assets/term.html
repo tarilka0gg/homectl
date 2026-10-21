@@ -3,6 +3,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <link rel="stylesheet" href="xterm/xterm.css">
 <style>
+  /* Nerd Font symbols (powerline, git, folder icons…) as a fallback for prompts that use them */
+  @font-face{font-family:"Symbols NF";src:url("fonts/SymbolsNerdFontMono-Regular.ttf")}
   html,body{margin:0;background:#0b0f14;color:#ccc;font:14px sans-serif;overflow:hidden;-webkit-user-select:none;user-select:none}
   /* html height:100% resolves to 0 in Android WebView, so pin to the viewport instead */
   #wrap{position:fixed;top:0;left:0;right:0;bottom:0;display:flex;flex-direction:column}
@@ -37,17 +39,22 @@
 </div>
 <script src="xterm/xterm.js"></script>
 <script src="xterm/addon-fit.js"></script>
+<script src="xterm/addon-canvas.js"></script>
 <script>
 const B = window.Android || null;
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 let fontSize = clamp(parseInt(localStorage.getItem('fs') || '13', 10) || 13, 7, 32);
 
-const term = new Terminal({fontSize, cursorBlink: true, scrollback: 50000, fontFamily: 'monospace',
+const FONTS = 'monospace, "Symbols NF"';
+const term = new Terminal({fontSize, cursorBlink: true, scrollback: 50000, fontFamily: FONTS, lineHeight: 1.0,
   allowProposedApi: true, theme: {background: '#0b0f14'}});
 const fitAddon = new FitAddon.FitAddon();
 term.loadAddon(fitAddon);
 const termEl = document.getElementById('term');
 term.open(termEl);
+// The canvas renderer draws each cell in a fixed grid, so tall fallback glyphs and font-size changes can't make rows overlap.
+try { term.loadAddon(new CanvasAddon.CanvasAddon()); } catch (e) { console.log('canvas renderer unavailable: ' + e); }
+if (document.fonts && document.fonts.load) document.fonts.load('13px "Symbols NF"').then(() => { try { term.clearTextureAtlas(); } catch (e) {} fit(); });
 
 const msg = document.getElementById('msg');
 const toastEl = document.getElementById('toast');
@@ -64,20 +71,34 @@ const enc = new TextEncoder();
 
 function send(s) { if (ws && ws.readyState === 1) ws.send(enc.encode(s)); }
 
+/* What this screen could hold. The machine picks the shell's size (the smallest attached client, like tmux) and
+   tells us with {"size":[c,r]}; we then resize to exactly that so output wraps the same everywhere. */
+function capacity() {
+  try { const d = fitAddon.proposeDimensions(); if (d && d.cols && d.rows) return d; } catch (e) {}
+  return null;
+}
 function fit() {
-  try { fitAddon.fit(); } catch (e) {}
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({resize: [term.cols, term.rows]}));
+  const d = capacity();
+  if (!d) return;
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({resize: [d.cols, d.rows]}));
+  else if (term.cols !== d.cols || term.rows !== d.rows) term.resize(d.cols, d.rows);
 }
 
 function connect() {
   if (!url) return;
   if (ws) { ws.onclose = null; try { ws.close(); } catch (e) {} }
-  try { fitAddon.fit(); } catch (e) {}
+  const cap = capacity() || {cols: term.cols, rows: term.rows};
   ended = false;
-  ws = new WebSocket(url + '&cols=' + term.cols + '&rows=' + term.rows);
+  ws = new WebSocket(url + '&cols=' + cap.cols + '&rows=' + cap.rows);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => { retry = 0; status(''); term.reset(); };
-  ws.onmessage = e => term.write(e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data);
+  ws.onmessage = e => {
+    if (typeof e.data === 'string') {
+      try { const m = JSON.parse(e.data); if (m.size) term.resize(m.size[0], m.size[1]); } catch (_) {}
+      return;
+    }
+    term.write(new Uint8Array(e.data));
+  };
   ws.onclose = ev => {
     if (ev.code === 1005) { ended = true; status('session ended — tap to start a new one'); return; }
     retry++;
@@ -111,6 +132,7 @@ function setFont(n) {
   fontSize = clamp(Math.round(n), 7, 32);
   term.options.fontSize = fontSize;
   localStorage.setItem('fs', String(fontSize));
+  try { term.clearTextureAtlas(); } catch (e) {}
   fit();
   toast('font ' + fontSize);
 }
@@ -177,7 +199,7 @@ function setFontLive(n) {
   n = clamp(Math.round(n), 7, 32);
   if (n === fontSize) return;
   fontSize = n; term.options.fontSize = n; localStorage.setItem('fs', String(n));
-  clearTimeout(liveTimer); liveTimer = setTimeout(() => { fit(); toast('font ' + n); }, 80);
+  clearTimeout(liveTimer); liveTimer = setTimeout(() => { try { term.clearTextureAtlas(); } catch (e) {} fit(); toast('font ' + n); }, 80);
 }
 termEl.addEventListener('touchend', e => {
   clearTimeout(lpTimer);

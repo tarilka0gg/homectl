@@ -139,6 +139,10 @@ async fn term_list(State(app): S) -> impl IntoResponse {
     Json(app.sessions.list())
 }
 
+async fn term_shells() -> impl IntoResponse {
+    Json(term::shells_json())
+}
+
 async fn term_kill(State(app): S, Path(id): Path<String>) -> StatusCode {
     if app.sessions.kill(&id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
 }
@@ -376,6 +380,7 @@ async fn pair_pending(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>,
 struct TermQ {
     t: String,
     s: Option<String>,
+    sh: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
 }
@@ -391,7 +396,8 @@ async fn term_ws(State(app): S, Query(q): Query<TermQ>, ws: WebSocketUpgrade) ->
     let (c, r) = (q.cols.unwrap_or(80), q.rows.unwrap_or(24));
     let id = q.s.unwrap_or_else(|| "main".into());
     let reg = app.sessions.clone();
-    ws.on_upgrade(move |sock| term::attach(reg, sock, id, c, r))
+    let sh = q.sh;
+    ws.on_upgrade(move |sock| term::attach(reg, sock, id, c, r, sh))
 }
 
 async fn index() -> Html<&'static str> {
@@ -450,6 +456,7 @@ async fn main() {
         .route("/procs", get(procs))
         .route("/procs/{pid}/{sig}", post(proc_signal))
         .route("/term/sessions", get(term_list))
+        .route("/term/shells", get(term_shells))
         .route("/term/sessions/{id}", axum::routing::delete(term_kill))
         .route("/term/sessions/{id}/name", post(term_rename))
         .route("/fs/list", get(fs::list))

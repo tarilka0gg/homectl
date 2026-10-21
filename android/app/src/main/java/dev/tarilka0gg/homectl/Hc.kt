@@ -115,7 +115,8 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
     }
 
     /** WebSocket URL for terminal session [sid] on the active address. */
-    fun termUrl(sid: String): String? = active?.let { it.url.replaceFirst("http", "ws") + "/api/term?t=$token&s=$sid" }
+    fun termUrl(sid: String, shell: String? = null): String? =
+        active?.let { it.url.replaceFirst("http", "ws") + "/api/term?t=$token&s=$sid" + (shell?.let { sh -> "&sh=" + Uri.encode(sh) } ?: "") }
 
     suspend fun delete(path: String): Boolean = call("DELETE", path) != null
 
