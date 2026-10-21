@@ -1,6 +1,7 @@
 #!/sbin/openrc-run
 # OpenRC unit: run as a normal user so wpctl/wl-clipboard/brightnessctl see that user's session.
 description="homectl control daemon"
+# Optional public tunnel: put  export HOMECTL_TUNNEL=quick  and  export PATH=$PATH:/home/tarilka0gg/.local/bin  in /etc/conf.d/homectl
 command="/usr/local/bin/homectl"
 command_user="${HOMECTL_USER:-tarilka0gg}"
 command_background=true

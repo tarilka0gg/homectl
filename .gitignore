@@ -5,3 +5,7 @@ android/build/
 android/.gradle/
 
 dist/*.apk
+android/.gradle/
+android/local.properties
+android/app/build/
+android/build/

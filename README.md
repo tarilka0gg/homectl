@@ -22,10 +22,16 @@ Token is generated in `~/.config/homectl/token`; the UI asks for it once. Use it
 
 Govee needs "LAN Control" enabled per device in the Govee app.
 
+## Reaching the daemon
+The app keeps every address the daemon reports (Tailscale, LAN, tunnel), probes them in parallel and uses the best one that answers, so it works with or without Tailscale.
+- **Tailscale / LAN:** nothing to set up.
+- **Public tunnel (no Tailscale):** run the daemon with `HOMECTL_TUNNEL=quick` (needs `cloudflared` on PATH). It prints a `https://*.trycloudflare.com` URL; that URL changes on every restart, but the app re-learns it whenever it connects over any route.
+- **Pair a phone:** `homectl pair` prints a `homectl://pair?...` link and a QR code. Open the link on the phone or paste it into the app.
+The tunnel exposes the API to the internet, protected only by the token (plus slow-down on failed attempts). Keep the token private; leave the tunnel off if you don't need it.
+
 ## Other pieces
 - `zig/` — `homectl-send IP:PORT TOKEN FILE`, static uploader (cross-compile: `zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSmall`) for the Pixel/Termux and servers.
-- `android/` — Android app (WebView shell for the UI + share-sheet "Send to homectl" for files). Build: `android/build.sh` (needs the SDK in `~/Android/sdk`: platform 34, build-tools 34.0.0) → `android/build/homectl.apk`. On first launch enter `http://<ip>:7878` and the token; long-press Back to change them.
-  Tested in an Android 14 x86_64 emulator (Google APIs image): setup dialog, live UI over `10.0.2.2`, and share-sheet upload from the Files app.
+- `android/` — native Android app (Kotlin, Jetpack Compose, Material 3 with Material You colours): Home, Lights, Controls, Tools tabs, plus Share → "Send to homectl". Build: `cd android && gradle :app:assembleRelease` (SDK in `~/Android/sdk`, signing key `~/.config/homectl/debug.keystore`, override with `HOMECTL_KEYSTORE`). Tested in an Android 14 emulator over both Tailscale and the tunnel.
 - `packaging/homectl.initd` — OpenRC script.
 
 ## Roadmap
