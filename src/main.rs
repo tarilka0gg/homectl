@@ -1,5 +1,7 @@
+mod actions;
 mod archive;
 mod ctl;
+mod display;
 mod fs;
 mod govee;
 mod monitor;
@@ -150,6 +152,43 @@ async fn procs(State(app): S, Query(q): Query<ProcQ>) -> impl IntoResponse {
 
 async fn term_list(State(app): S) -> impl IntoResponse {
     Json(app.sessions.list())
+}
+
+async fn displays_get() -> impl IntoResponse {
+    Json(display::list().await)
+}
+
+#[derive(Deserialize)]
+struct DispQ {
+    compositor: Option<u8>,
+}
+
+async fn displays_set(Path((id, state)): Path<(String, String)>, Query(q): Query<DispQ>) -> Response {
+    let on = match state.as_str() {
+        "on" => true,
+        "off" => false,
+        _ => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    match display::set(&id, on, q.compositor != Some(0)).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+async fn actions_get() -> impl IntoResponse {
+    Json(actions::list().await)
+}
+
+async fn actions_run(Path((id, state)): Path<(String, String)>) -> Response {
+    let on = match state.as_str() {
+        "on" => true,
+        "off" => false,
+        _ => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    match actions::run(&id, on).await {
+        Ok(v) => Json(v).into_response(),
+        Err((code, e)) => (StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), Json(json!({ "error": e }))).into_response(),
+    }
 }
 
 async fn term_shells() -> impl IntoResponse {
@@ -470,6 +509,10 @@ async fn main() {
         .route("/procs/{pid}/{sig}", post(proc_signal))
         .route("/term/sessions", get(term_list))
         .route("/term/shells", get(term_shells))
+        .route("/displays", get(displays_get))
+        .route("/displays/{id}/{state}", post(displays_set))
+        .route("/actions", get(actions_get))
+        .route("/actions/{id}/{state}", post(actions_run))
         .route("/term/sessions/{id}", axum::routing::delete(term_kill))
         .route("/term/sessions/{id}/name", post(term_rename))
         .route("/fs/list", get(fs::list))

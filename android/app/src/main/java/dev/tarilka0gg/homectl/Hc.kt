@@ -240,6 +240,10 @@ object Hc {
     var speedMs by mutableIntStateOf(1000)
     /** Monitor CPU section: one small graph per core instead of bars. */
     var perCoreGraphs by mutableStateOf(false)
+    /** When turning a monitor off, also disable its output in the compositor so the GPU can sleep. */
+    var compositorOff by mutableStateOf(true)
+    fun updateCompositorOff(v: Boolean) { compositorOff = v; prefs.edit().putBoolean("compoff", v).apply() }
+
     /** Last open tab, so coming back to the app lands where you left. */
     var lastTab by mutableIntStateOf(0)
 
@@ -256,6 +260,7 @@ object Hc {
         selectedId = prefs.getString("selected", "") ?: ""
         speedMs = prefs.getInt("speed", 1000)
         perCoreGraphs = prefs.getBoolean("percore", false)
+        compositorOff = prefs.getBoolean("compoff", true)
         lastTab = prefs.getInt("tab", 0)
         prefs.getString("machines", null)?.let { s ->
             val a = JSONArray(s)

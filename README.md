@@ -13,10 +13,10 @@ Control your own computers and smart home from your phone. A small daemon runs o
 | Tab | |
 |---|---|
 | **Monitor** | btop-style live view. CPU graph with per-core load *and temperature*; **each GPU** (iGPU and dGPU: load, VRAM, core/memory clocks, power, temperature, fan, with graphs); temperature graph and sensors (NVMe, DIMM); **fans** with RPM graph; memory/swap; network with **peaks**, totals and per-interface rates; disk I/O with peaks; disks; battery. **Per-core graphs** (one live graph per CPU thread, with temperature) or bars. A full **process table**: tap a column header (PID / NAME / CPU / MEM) to sort, tap again to reverse, search by name, command, user or PID, tap a process to terminate, kill, pause or resume it. Several machines (laptop *and* server) show side by side. |
-| **Controls** | Govee **lights** (real on/off, brightness, colour). Switches that follow the real state: Wi-Fi, Bluetooth and each paired device, airplane mode, public tunnel, webcam toggles. Sliders for screen and monitor brightness. **Audio**: every usable output and input as its own row (volume, mute, pick the default; unplugged ones are hidden), plus a **per-app mixer**. |
+| **Controls** | **Screens off/on** (built-in panel, external monitors, compositor output). Govee **lights** (real on/off, brightness, colour). Switches that follow the real state: Wi-Fi, Bluetooth and each paired device, airplane mode, public tunnel, webcam toggles. Sliders for screen and monitor brightness. **Audio**: every usable output and input as its own row (volume, mute, pick the default; unplugged ones are hidden), plus a **per-app mixer**. |
 | **Terminal** | A real shell (xterm.js, canvas renderer, with Nerd Font symbols built in so fancy prompts — powerline, icons — draw correctly). The shell's size is the smallest attached screen, like tmux, so output wraps the same everywhere. **Sessions keep running on the machine** — leave the tab, close the app, lose Wi-Fi, and you reattach to the same screen. **Pick the shell** per session (＋ menu lists what's installed: fish, bash…) or switch the current one from ⋮. Multiple session tabs, **split view** (two terminals at once, can be different machines), **SSH** shortcut with history. Two rows of keys (Esc, Tab, Ctrl, Alt, arrows, F1–F12, Ctrl-combos…), keyboard show/hide button, **pinch to zoom** and A−/A+, touch scrolling, long-press to **select** text, Paste, and a **Buffer** view with the whole scrollback — filter it, select any part, or copy the last N lines. |
 | **Files** | Browse the machine's files with **thumbnails** for images. Tap a file to **preview** it: images (pinch/double-tap zoom, swipe through the folder), text and code, PDFs. **Look inside archives** (zip, tar, tar.gz, gz natively; 7z, rar, xz, bz2 … through `bsdtar` if installed) like a folder, preview files inside without unpacking, and **unzip** everything or just what you tick. Download to the phone (Downloads/homectl), open, share, upload, make folders. The machines also appear in Android's **own file picker**, so any app (Telegram, Gmail…) can attach files straight from them. |
-| **System** | **Update speed** (0.5 s – 5 s; machines sample slowly when nobody is watching to save power). Lock / suspend / restart / power off (with confirmation), services as switches, clipboard sync, send files. Share → **homectl** from any app sends files to the machine. |
+| **System** | **Power modes** (your `*-on.sh` / `*-off.sh` scripts, e.g. a deep-idle mode, with a confirmation first). **Update speed** (0.5 s – 5 s; machines sample slowly when nobody is watching to save power). Lock / suspend / restart / power off (with confirmation), services as switches, clipboard sync, send files. Share → **homectl** from any app sends files to the machine. |
 
 ## Download
 
@@ -57,6 +57,15 @@ The app remembers every address a machine reports and uses the best one that ans
 - **Power / services** use `loginctl`, else `doas -n` (a passwordless doas rule for `poweroff`, `reboot` and `rc-service` is needed on hosts without logind, such as Alpine).
 - **Govee:** enable **LAN Control** for each light in the Govee app.
 
+## Screens and power modes
+- **Screens off/on** (Controls tab): the built-in panel by backlight, external monitors by DDC/CI power mode (`ddcutil setvcp d6`) — DPMS makes some monitors cycle test patterns instead of sleeping — and optionally also the compositor output (niri) so the GPU can stop driving a dark screen and sleep. Needs `ddcutil` (and `brightnessctl` for the panel).
+- **Power modes** (System tab): your own on/off script pairs. A pair named `<name>-on.sh` + `<name>-off.sh` in your home, `~/.local/bin` or `/usr/local/bin` shows up automatically; more (with a state check and a warning text) go in `~/.config/homectl/actions.json` — see `docs/actions.example.json`. They run through `doas -n`, so each script needs a passwordless rule; when it's missing the app shows the exact line to add, for example
+  ```
+  permit nopass YOU cmd /usr/local/bin/battery-powersave-on.sh        # executable script
+  permit nopass YOU cmd sh args /home/YOU/idle-on.sh                  # run via sh
+  ```
+  (one rule for the `-on` and one for the `-off` script). The daemon never edits `/etc/doas.conf`.
+
 ## Run at boot (OpenRC)
 `packaging/homectl.initd` is an init script: copy it to `/etc/init.d/homectl`, install the binary to `/usr/local/bin/homectl`, then `rc-update add homectl`. For the tunnel put `export HOMECTL_TUNNEL=quick` in `/etc/conf.d/homectl`.
 
@@ -76,6 +85,8 @@ All routes need `Authorization: Bearer <token>` except `/api/ping` and pairing. 
 | `GET /api/lights[?rescan=1]`, `POST /api/lights/{ip}` | Govee state and control |
 | `POST /api/power/{lock,suspend,reboot,poweroff}`, `POST /api/procs/{pid}/{term,kill,stop,cont}` | |
 | `GET /api/services`, `POST /api/services/{name}/{start,stop,restart}` | |
+| `GET /api/displays`, `POST /api/displays/{internal,N,all}/{on,off}[?compositor=0]` | screens off/on |
+| `GET /api/actions`, `POST /api/actions/{id}/{on,off}` | power modes (your scripts) |
 | `GET/POST /api/clipboard`, `POST /api/files/{name}` | clipboard; upload to `~/homectl-inbox/` |
 | `GET /api/term?t=<token>&s=<session>` (WebSocket) | attach to a session (created on first use); replays recent output; binary = bytes, text = `{"resize":[cols,rows]}` |
 | `POST /api/pair/request`, `POST /api/pair/confirm` | code pairing (LAN/tailnet only) |

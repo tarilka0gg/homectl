@@ -1,0 +1,11 @@
+[
+  {
+    "id": "idle",
+    "title": "Deep idle",
+    "desc": "One core, fans off, screens off — SSH stays up.",
+    "on": "doas -n sh /home/me/idle-on.sh",
+    "off": "doas -n sh /home/me/idle-off.sh",
+    "state": "[ \"$(cat /sys/devices/system/cpu/online)\" = \"0\" ]",
+    "confirm_on": "Don't start builds or games until you turn this off again."
+  }
+]

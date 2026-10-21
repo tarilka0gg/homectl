@@ -19,6 +19,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import org.json.JSONObject
 
 @Composable
 fun SystemScreen(onAddMachine: () -> Unit) {
@@ -38,6 +41,82 @@ fun SystemScreen(onAddMachine: () -> Unit) {
             "How often the Monitor refreshes and the machines take new samples. Faster looks smoother but uses more battery, data and CPU on the machine; when the app isn't open, machines sample every 5 s.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+
+    var modesNonce by remember { mutableIntStateOf(0) }
+    val modes = loaded(modesNonce, 6000) { Hc.array("/api/actions") }
+    var modeConfirm by remember { mutableStateOf<Triple<JSONObject, Boolean, String>?>(null) }
+    var modeResult by remember { mutableStateOf<Pair<String, JSONObject>?>(null) }
+    var modeBusy by remember { mutableStateOf(setOf<String>()) }
+    fun runMode(a: JSONObject, on: Boolean) {
+        val id = a.str("id")
+        modeBusy = modeBusy + id
+        scope.launch {
+            val (code, j) = Hc.cur?.postSlow("/api/actions/$id/${if (on) "on" else "off"}", JSONObject(), 200_000) ?: (0 to null)
+            modeBusy = modeBusy - id
+            modesNonce++
+            when {
+                code == 200 && j?.optBoolean("ok") == true -> Toast.makeText(ctx, "${a.str("title")}: ${if (on) "on" else "off"}", Toast.LENGTH_SHORT).show()
+                j != null -> modeResult = a.str("title") to j
+                else -> Toast.makeText(ctx, "Couldn't reach the machine", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+    fun requestMode(a: JSONObject, on: Boolean) {
+        val warn = (if (on) a.str("confirm_on") else a.str("confirm_off")).trim()
+        if (warn.isNotEmpty()) modeConfirm = Triple(a, on, warn) else runMode(a, on)
+    }
+    val modeList = modes.value?.objs().orEmpty()
+    if (modeList.isNotEmpty()) Section("Power modes") {
+        modeList.forEach { a ->
+            val id = a.str("id")
+            val busy = id in modeBusy || a.optBoolean("running")
+            val sub = listOf(a.str("desc"), if (a.optBoolean("assumed")) "state assumed from last use" else "").filter { it.isNotBlank() }.joinToString("\n")
+            if (!a.isNull("state")) {
+                SwitchRow(a.str("title"), a.optBoolean("state"), sub.ifBlank { null }, enabled = !busy) { on -> requestMode(a, on) }
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(a.str("title"), style = MaterialTheme.typography.bodyLarge)
+                    if (sub.isNotBlank()) Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilledTonalButton({ requestMode(a, true) }, enabled = !busy) { Text("Turn on") }
+                        OutlinedButton({ requestMode(a, false) }, enabled = !busy) { Text("Turn off") }
+                    }
+                }
+            }
+            if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        }
+        Text("Scripts named <name>-on.sh / <name>-off.sh in your home, ~/.local/bin or /usr/local/bin show up here automatically; they run through doas. More can be defined in ~/.config/homectl/actions.json.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    modeConfirm?.let { (a, on, warn) ->
+        AlertDialog(
+            onDismissRequest = { modeConfirm = null },
+            title = { Text("${if (on) "Turn on" else "Turn off"} ${a.str("title")}?") },
+            text = { Text(warn) },
+            confirmButton = { TextButton({ modeConfirm = null; runMode(a, on) }) { Text(if (on) "Turn on" else "Turn off") } },
+            dismissButton = { TextButton({ modeConfirm = null }) { Text("Cancel") } },
+        )
+    }
+    modeResult?.let { (title, j) ->
+        AlertDialog(
+            onDismissRequest = { modeResult = null },
+            title = { Text("$title failed") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (j.str("hint").isNotBlank()) Text(j.str("hint"), style = MaterialTheme.typography.bodyMedium, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                    val o = j.str("output").trim().ifBlank { j.str("error") }
+                    if (o.isNotBlank()) Text(o, style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                    Text("exit code ${j.optInt("code")}", style = MaterialTheme.typography.labelSmall)
+                }
+            },
+            confirmButton = { TextButton({ modeResult = null }) { Text("Close") } },
+            dismissButton = {
+                if (j.str("hint").isNotBlank()) TextButton({
+                    (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("doas rule", j.str("hint").substringAfter('\n')))
+                    Toast.makeText(ctx, "Rule copied", Toast.LENGTH_SHORT).show()
+                }) { Text("Copy rule") }
+            },
         )
     }
 

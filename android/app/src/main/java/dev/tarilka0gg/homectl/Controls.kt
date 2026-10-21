@@ -30,6 +30,42 @@ fun ControlsScreen() {
 
     LightsScreen()
 
+    val disp = loaded(nonce, 15000) { Hc.json("/api/displays") }
+    var allOffConfirm by remember { mutableStateOf(false) }
+    disp.value?.let { d ->
+        val internal = d.optJSONObject("internal")
+        val externals = d.optJSONArray("external")?.objs().orEmpty()
+        if (internal != null || externals.isNotEmpty()) Section("Screens") {
+            val comp = if (Hc.compositorOff) 1 else 0
+            internal?.let {
+                SwitchRow(it.str("title"), it.optBoolean("on"), if (it.optBoolean("on")) "${it.optInt("percent")}% brightness" else "off (backlight at 0)") { on ->
+                    act(1200) { Hc.post("/api/displays/internal/${if (on) "on" else "off"}") }
+                }
+            }
+            externals.forEach { e ->
+                val known = !e.isNull("on")
+                SwitchRow(e.str("title"), e.optBoolean("on"), if (known) e.str("detail") else "${e.str("detail")} · not answering", enabled = true) { on ->
+                    act(3000) { Hc.post("/api/displays/${e.str("id")}/${if (on) "on" else "off"}?compositor=$comp") }
+                }
+            }
+            if (externals.isNotEmpty() && d.optBoolean("compositor")) {
+                SwitchRow("Also disable it in the compositor", Hc.compositorOff, "frees the GPU from driving a dark screen so it can sleep") { Hc.updateCompositorOff(it) }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton({ allOffConfirm = true }) { Text("All screens off") }
+                FilledTonalButton({ act(3000) { Hc.post("/api/displays/all/on?compositor=$comp") } }) { Text("All screens on") }
+            }
+            Text("External monitors use DDC/CI standby (not DPMS), the built-in panel its backlight.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+    if (allOffConfirm) AlertDialog(
+        onDismissRequest = { allOffConfirm = false },
+        title = { Text("Turn every screen off?") },
+        text = { Text("You can turn them back on from here, or by pressing a key on the machine.") },
+        confirmButton = { TextButton({ allOffConfirm = false; act(3000) { Hc.post("/api/displays/all/off?compositor=${if (Hc.compositorOff) 1 else 0}") } }) { Text("Turn off") } },
+        dismissButton = { TextButton({ allOffConfirm = false }) { Text("Cancel") } },
+    )
+
     Section("Connectivity") {
         val r = radios.value
         if (r == null) Text("Loading…") else {
