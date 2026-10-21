@@ -108,6 +108,9 @@ function connect() {
   };
 }
 window.hcStart = function (u) { url = u; retry = 0; connect(); };
+// Back from another app the socket is often dead: reconnect right away instead of waiting for the retry timer.
+window.hcResume = function () { if (url && (!ws || ws.readyState > 1) && !ended) { retry = 0; connect(); } fit(); };
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') window.hcResume(); });
 window.hcSend = send;
 window.hcPaste = t => term.paste(t);
 msg.onclick = () => { if (ended) connect(); };

@@ -28,7 +28,9 @@ private val fanColors = listOf(Color(0xFF29B6F6), Color(0xFFAB47BC), Color(0xFF2
 
 @Composable
 fun MonitorScreen() {
-    val data = loaded(Hc.gpuLive, 1500) { Hc.json(if (Hc.gpuLive) "/api/monitor?gpu=1" else "/api/monitor") }
+    val data = loaded(listOf(Hc.gpuLive, Hc.speedMs, Hc.perCoreGraphs), Hc.speedMs.coerceAtLeast(500).toLong()) {
+        Hc.json("/api/monitor?every=${Hc.speedMs}" + (if (Hc.gpuLive) "&gpu=1" else "") + (if (Hc.perCoreGraphs) "&cores=1" else ""))
+    }
     val scope = rememberCoroutineScope()
     if (Hc.machines.size > 1) Fleet()
     val d = data.value
@@ -65,7 +67,28 @@ fun MonitorScreen() {
         Text("${"%.2f".format(cpu.optDouble("freq_mhz") / 1000)} GHz avg · ${"%.2f".format(cpu.optDouble("freq_max_mhz") / 1000)} max", style = MaterialTheme.typography.labelMedium)
     }) {
         Chart(listOf(hist.series("cpu")), listOf(primary), { "%.0f%%".format(it) }, max = 100f)
-        cores.withIndex().chunked(2).forEach { pair ->
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(!Hc.perCoreGraphs, { Hc.setPerCore(false) }, label = { Text("Bars") })
+            FilterChip(Hc.perCoreGraphs, { Hc.setPerCore(true) }, label = { Text("Graph per core") })
+        }
+        val coreHist = d.optJSONArray("core_history")
+        if (Hc.perCoreGraphs && coreHist != null) {
+            cores.withIndex().chunked(2).forEach { pair ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    pair.forEach { (i, p) ->
+                        val t = coreTemps?.let { if (i < it.length() && !it.isNull(i)) it.getDouble(i) else null }
+                        Column(Modifier.weight(1f)) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("core $i", style = MaterialTheme.typography.labelSmall)
+                                Text("${p.toInt()}%" + (t?.let { " · ${it.toInt()}°" } ?: ""), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+                            }
+                            Spark(listOf(coreHist.optJSONArray(i)?.floats().orEmpty()), listOf(heat(p)), max = 100f, height = 34.dp)
+                        }
+                    }
+                    if (pair.size == 1) Spacer(Modifier.weight(1f))
+                }
+            }
+        } else cores.withIndex().chunked(2).forEach { pair ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 pair.forEach { (i, p) ->
                     Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -236,7 +259,7 @@ private fun Processes(count: Int, scope: CoroutineScope) {
     var q by remember { mutableStateOf("") }
     var limit by remember { mutableIntStateOf(40) }
     var selected by remember { mutableStateOf<JSONObject?>(null) }
-    val res = loaded(listOf(sort, desc, q, limit), 2000) {
+    val res = loaded(listOf(sort, desc, q, limit), (Hc.speedMs * 2).coerceIn(1000, 10000).toLong()) {
         Hc.json("/api/procs?sort=$sort&order=${if (desc) "desc" else "asc"}&q=${Uri.encode(q)}&limit=$limit")
     }
     Section("Processes  ($count)") {

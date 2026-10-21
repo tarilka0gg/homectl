@@ -56,13 +56,13 @@ pub async fn download(Query(q): Query<PathQ>, headers: HeaderMap) -> Response {
         return StatusCode::BAD_REQUEST.into_response();
     }
     let len = meta.len();
-    let start = headers
-        .get(header::RANGE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("bytes="))
-        .and_then(|v| v.split('-').next())
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("bytes="));
+    let start = range.and_then(|v| v.split('-').next()).and_then(|v| v.parse::<u64>().ok()).filter(|s| *s < len);
+    // bytes=a-b: inclusive end, so a preview can fetch just the beginning of a big file
+    let end = range
+        .and_then(|v| v.split('-').nth(1))
         .and_then(|v| v.parse::<u64>().ok())
-        .filter(|s| *s < len);
+        .map_or(len - 1, |e| e.min(len - 1));
     if let Some(s) = start {
         if f.seek(std::io::SeekFrom::Start(s)).await.is_err() {
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -74,11 +74,11 @@ pub async fn download(Query(q): Query<PathQ>, headers: HeaderMap) -> Response {
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\""))
-        .header(header::CONTENT_LENGTH, len - start.unwrap_or(0));
+        .header(header::CONTENT_LENGTH, end + 1 - start.unwrap_or(0));
     if let Some(s) = start {
-        r = r.header(header::CONTENT_RANGE, format!("bytes {s}-{}/{len}", len - 1));
+        r = r.header(header::CONTENT_RANGE, format!("bytes {s}-{end}/{len}"));
     }
-    r.body(Body::from_stream(ReaderStream::with_capacity(f.take(len - start.unwrap_or(0)), 256 * 1024))).unwrap()
+    r.body(Body::from_stream(ReaderStream::with_capacity(f.take(end + 1 - start.unwrap_or(0)), 256 * 1024))).unwrap()
 }
 
 #[derive(Deserialize)]
@@ -122,4 +122,109 @@ pub struct Mk {
 
 pub async fn mkdir(Json(m): Json<Mk>) -> StatusCode {
     if tokio::fs::create_dir(resolve(Some(&m.path))).await.is_ok() { StatusCode::NO_CONTENT } else { StatusCode::INTERNAL_SERVER_ERROR }
+}
+
+
+#[derive(Deserialize)]
+pub struct ThumbQ {
+    path: String,
+    size: Option<u32>,
+}
+
+/// A small JPEG of an image, cached on disk so browsing a photo folder stays quick.
+pub async fn thumb(Query(q): Query<ThumbQ>) -> Response {
+    let size = q.size.unwrap_or(128).clamp(48, 512);
+    let p = resolve(Some(&q.path));
+    let Ok(meta) = tokio::fs::metadata(&p).await else { return StatusCode::NOT_FOUND.into_response() };
+    if !meta.is_file() || meta.len() > 96 << 20 {
+        return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+    }
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (p.display().to_string(), meta.len(), meta.mtime(), size).hash(&mut h);
+    let cache = home().join(".cache/homectl/thumbs").join(format!("{:016x}.jpg", h.finish()));
+    if let Ok(b) = tokio::fs::read(&cache).await {
+        return ([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "max-age=86400")], b).into_response();
+    }
+    let made = tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+        use image::{ImageDecoder, ImageReader};
+        let reader = ImageReader::open(&p).ok()?.with_guessed_format().ok()?;
+        let mut dec = reader.into_decoder().ok()?;
+        let orientation = dec.orientation().ok();
+        let mut img = image::DynamicImage::from_decoder(dec).ok()?;
+        if let Some(o) = orientation {
+            img.apply_orientation(o);
+        }
+        let t = img.thumbnail(size, size).to_rgb8();
+        let mut out = vec![];
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 78).encode_image(&t).ok()?;
+        Some(out)
+    })
+    .await
+    .ok()
+    .flatten();
+    match made {
+        Some(b) => {
+            if let Some(d) = cache.parent() {
+                let _ = tokio::fs::create_dir_all(d).await;
+            }
+            let _ = tokio::fs::write(&cache, &b).await;
+            ([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "max-age=86400")], b).into_response()
+        }
+        None => StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response(),
+    }
+}
+
+// ---- archives ----
+
+fn err(e: String) -> Response {
+    (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": e }))).into_response()
+}
+
+pub async fn archive_list(Query(q): Query<PathQ>) -> Response {
+    let p = resolve(q.path.as_deref());
+    match tokio::task::spawn_blocking(move || crate::archive::list_json(&p)).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => err(e),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ExtractReq {
+    path: String,
+    dest: Option<String>,
+    entries: Option<Vec<String>>,
+}
+
+pub async fn archive_extract(Json(r): Json<ExtractReq>) -> Response {
+    let p = resolve(Some(&r.path));
+    let dest = r.dest.as_deref().map(|d| resolve(Some(d)));
+    let only: Option<std::collections::HashSet<String>> = r.entries.map(|v| v.into_iter().collect());
+    match tokio::task::spawn_blocking(move || crate::archive::extract(&p, dest.as_deref(), only.as_ref())).await {
+        Ok(Ok(s)) => Json(json!({"dest": s.dest.display().to_string(), "files": s.files, "bytes": s.bytes})).into_response(),
+        Ok(Err(e)) => err(e),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct EntryQ {
+    path: String,
+    entry: String,
+}
+
+pub async fn archive_file(Query(q): Query<EntryQ>) -> Response {
+    let p = resolve(Some(&q.path));
+    let name = q.entry.rsplit('/').next().unwrap_or("file").replace('"', "");
+    match tokio::task::spawn_blocking(move || crate::archive::read_entry(&p, &q.entry)).await {
+        Ok(Ok(b)) => Response::builder()
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_LENGTH, b.len())
+            .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\""))
+            .body(Body::from(b))
+            .unwrap(),
+        Ok(Err(e)) => err(e),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }

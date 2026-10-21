@@ -1,3 +1,4 @@
+mod archive;
 mod ctl;
 mod fs;
 mod govee;
@@ -113,13 +114,24 @@ async fn stats() -> impl IntoResponse {
 #[derive(Deserialize)]
 struct MonQ {
     gpu: Option<u8>,
+    /// ms between fresh samples the client wants (250–10000)
+    every: Option<u64>,
+    /// include the per-core CPU history (bigger reply)
+    cores: Option<u8>,
 }
 
 async fn monitor(State(app): S, Query(q): Query<MonQ>) -> impl IntoResponse {
+    app.mon.touch(q.every);
     if q.gpu == Some(1) {
         app.mon.force_gpu();
     }
-    Json(app.mon.snapshot.read().unwrap().clone())
+    let mut v = app.mon.snapshot.read().unwrap().clone();
+    if q.cores != Some(1) {
+        if let Some(o) = v.as_object_mut() {
+            o.remove("core_history");
+        }
+    }
+    Json(v)
 }
 
 #[derive(Deserialize)]
@@ -131,6 +143,7 @@ struct ProcQ {
 }
 
 async fn procs(State(app): S, Query(q): Query<ProcQ>) -> impl IntoResponse {
+    app.mon.touch(None);
     let desc = q.order.as_deref() != Some("asc");
     Json(app.mon.query_procs(q.sort.as_deref().unwrap_or("cpu"), desc, q.q.as_deref().unwrap_or(""), q.limit.unwrap_or(80).min(2000)))
 }
@@ -463,6 +476,10 @@ async fn main() {
         .route("/fs/download", get(fs::download))
         .route("/fs/upload", post(fs::upload))
         .route("/fs/mkdir", post(fs::mkdir))
+        .route("/fs/thumb", get(fs::thumb))
+        .route("/fs/archive/list", get(fs::archive_list))
+        .route("/fs/archive/extract", post(fs::archive_extract))
+        .route("/fs/archive/file", get(fs::archive_file))
         .route("/tunnel", get(tunnel_get).post(tunnel_post))
         .layer(axum::extract::DefaultBodyLimit::disable())
         .layer(middleware::from_fn_with_state(app.clone(), auth))

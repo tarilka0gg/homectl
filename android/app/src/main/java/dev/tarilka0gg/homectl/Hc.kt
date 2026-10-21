@@ -3,6 +3,7 @@ package dev.tarilka0gg.homectl
 import android.content.Context
 import android.net.Uri
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -120,19 +121,64 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
 
     suspend fun delete(path: String): Boolean = call("DELETE", path) != null
 
-    /** Streams a remote file: [block] gets the stream and its length (-1 if unknown). */
-    suspend fun <T> download(path: String, block: (java.io.InputStream, Long) -> T): T? {
+    /** Streams a GET: [block] gets the stream and its length (-1 if unknown). [range] e.g. "bytes=0-65535". */
+    suspend fun <T> stream(pathQuery: String, range: String? = null, block: (java.io.InputStream, Long) -> T): T? {
         val e = active ?: resolve() ?: return null
         return withContext(Dispatchers.IO) {
             try {
-                val c = Net.open(e.url, "GET", "/api/fs/download?path=" + Uri.encode(path), token, 6000)
+                val c = Net.open(e.url, "GET", pathQuery, token, 6000)
                 c.readTimeout = 60000
+                if (range != null) c.setRequestProperty("Range", range)
                 if (c.responseCode !in 200..299) { c.disconnect(); return@withContext null }
                 val r = c.inputStream.use { block(it, c.contentLengthLong) }
                 c.disconnect()
                 r
             } catch (_: Exception) {
                 null
+            }
+        }
+    }
+
+    /** Streams a remote file: [block] gets the stream and its length (-1 if unknown). */
+    suspend fun <T> download(path: String, block: (java.io.InputStream, Long) -> T): T? =
+        stream("/api/fs/download?path=" + Uri.encode(path), null, block)
+
+    /** A whole (small) response as bytes, e.g. a thumbnail. */
+    suspend fun bytes(pathQuery: String, max: Int = 4_000_000): ByteArray? =
+        stream(pathQuery) { i, _ -> i.readNBytes(max) }
+
+    /** POST that may take a while (unpacking an archive). Returns HTTP status and the JSON body. */
+    suspend fun postSlow(path: String, body: JSONObject, readTimeoutMs: Int = 600_000): Pair<Int, JSONObject?> {
+        val e = active ?: resolve() ?: return 0 to null
+        return withContext(Dispatchers.IO) {
+            try {
+                val c = Net.open(e.url, "POST", path, token, 6000)
+                c.readTimeout = readTimeoutMs
+                c.doOutput = true
+                c.setRequestProperty("Content-Type", "application/json")
+                c.outputStream.use { it.write(body.toString().toByteArray()) }
+                val code = c.responseCode
+                val text = (if (code < 400) c.inputStream else c.errorStream)?.bufferedReader()?.readText().orEmpty()
+                c.disconnect()
+                code to runCatching { JSONObject(text) }.getOrNull()
+            } catch (_: Exception) {
+                0 to null
+            }
+        }
+    }
+
+    suspend fun getSlow(pathQuery: String, readTimeoutMs: Int = 120_000): Pair<Int, JSONObject?> {
+        val e = active ?: resolve() ?: return 0 to null
+        return withContext(Dispatchers.IO) {
+            try {
+                val c = Net.open(e.url, "GET", pathQuery, token, 6000)
+                c.readTimeout = readTimeoutMs
+                val code = c.responseCode
+                val text = (if (code < 400) c.inputStream else c.errorStream)?.bufferedReader()?.readText().orEmpty()
+                c.disconnect()
+                code to runCatching { JSONObject(text) }.getOrNull()
+            } catch (_: Exception) {
+                0 to null
             }
         }
     }
@@ -190,6 +236,17 @@ object Hc {
     /** Read NVIDIA stats even on battery (asks the daemon to, which may keep the dGPU awake). */
     var gpuLive by mutableStateOf(false)
 
+    /** How often the machines take fresh samples and the Monitor refreshes (ms). */
+    var speedMs by mutableIntStateOf(1000)
+    /** Monitor CPU section: one small graph per core instead of bars. */
+    var perCoreGraphs by mutableStateOf(false)
+    /** Last open tab, so coming back to the app lands where you left. */
+    var lastTab by mutableIntStateOf(0)
+
+    fun setSpeed(ms: Int) { speedMs = ms; prefs.edit().putInt("speed", ms).apply() }
+    fun setPerCore(v: Boolean) { perCoreGraphs = v; prefs.edit().putBoolean("percore", v).apply() }
+    fun setTab(i: Int) { lastTab = i; prefs.edit().putInt("tab", i).apply() }
+
     val paired get() = machines.isNotEmpty()
     val cur: Machine? get() = machines.find { it.id == selectedId } ?: machines.firstOrNull()
 
@@ -197,6 +254,9 @@ object Hc {
         if (::prefs.isInitialized) return
         prefs = ctx.applicationContext.getSharedPreferences("homectl", Context.MODE_PRIVATE)
         selectedId = prefs.getString("selected", "") ?: ""
+        speedMs = prefs.getInt("speed", 1000)
+        perCoreGraphs = prefs.getBoolean("percore", false)
+        lastTab = prefs.getInt("tab", 0)
         prefs.getString("machines", null)?.let { s ->
             val a = JSONArray(s)
             for (i in 0 until a.length()) {

@@ -32,6 +32,11 @@ pub struct Shared {
     pub procs: RwLock<Vec<ProcRow>>,
     /// Unix seconds until which the app asked for NVIDIA readings even on battery.
     pub gpu_force_until: AtomicU64,
+    /// Unix ms of the last request for data. With nobody watching, sampling slows down to save power.
+    pub last_request_ms: AtomicU64,
+    /// Sampling interval the app asked for (ms), and when it asked.
+    pub every_ms: AtomicU64,
+    pub every_set_ms: AtomicU64,
 }
 
 pub type Monitor = Arc<Shared>;
@@ -40,7 +45,29 @@ fn now_s() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+const DEFAULT_EVERY_MS: u64 = 1000;
+const IDLE_EVERY_MS: u64 = 5000;
+const IDLE_AFTER_MS: u64 = 30_000;
+
 impl Shared {
+    /// A client asked for data. `every` (ms) is how fast it wants fresh samples; the fastest recent ask wins.
+    pub fn touch(&self, every: Option<u64>) {
+        let now = now_ms();
+        self.last_request_ms.store(now, Ordering::Relaxed);
+        if let Some(e) = every {
+            let e = e.clamp(250, 10_000);
+            let (cur, at) = (self.every_ms.load(Ordering::Relaxed), self.every_set_ms.load(Ordering::Relaxed));
+            if e <= cur || now.saturating_sub(at) > 6000 {
+                self.every_ms.store(e, Ordering::Relaxed);
+                self.every_set_ms.store(now, Ordering::Relaxed);
+            }
+        }
+    }
+
     pub fn force_gpu(&self) {
         self.gpu_force_until.store(now_s() + 15, Ordering::Relaxed);
     }
@@ -448,7 +475,11 @@ impl Hist {
         }
     }
     fn to_json(&self) -> Value {
-        json!(self.0.iter().map(|(k, v)| (k.clone(), v.iter().collect::<Vec<_>>())).collect::<HashMap<_, _>>())
+        json!(self.0.iter().filter(|(k, _)| !k.starts_with("core.")).map(|(k, v)| (k.clone(), v.iter().collect::<Vec<_>>())).collect::<HashMap<_, _>>())
+    }
+    /// One series per CPU thread, in thread order.
+    fn cores_json(&self, n: usize) -> Value {
+        json!((0..n).map(|i| self.0.get(&format!("core.{i}")).map(|v| v.iter().collect::<Vec<_>>()).unwrap_or_default()).collect::<Vec<_>>())
     }
 }
 
@@ -458,6 +489,8 @@ fn core_id_map(n: usize) -> Vec<u32> {
 
 pub fn start() -> Monitor {
     let shared: Monitor = Arc::new(Shared::default());
+    shared.every_ms.store(DEFAULT_EVERY_MS, Ordering::Relaxed);
+    shared.last_request_ms.store(now_ms(), Ordering::Relaxed);
     let out = shared.clone();
     std::thread::spawn(move || {
         let info = json!({
@@ -480,7 +513,11 @@ pub fn start() -> Monitor {
         let mut disk_cache = disks();
         let mut disk_at = Instant::now();
         loop {
-            std::thread::sleep(Duration::from_secs(1));
+            // Nobody watching → sample slowly (saves CPU/battery); otherwise at the rate the app asked for.
+            let idle = now_ms().saturating_sub(out.last_request_ms.load(Ordering::Relaxed)) > IDLE_AFTER_MS;
+            let asked = out.every_ms.load(Ordering::Relaxed);
+            let interval = if idle { IDLE_EVERY_MS } else if now_ms().saturating_sub(out.every_set_ms.load(Ordering::Relaxed)) > 15_000 { DEFAULT_EVERY_MS } else { asked };
+            std::thread::sleep(Duration::from_millis(interval));
             let now = Instant::now();
             let dt = now.duration_since(last).as_secs_f64().max(0.001);
             last = now;
@@ -586,6 +623,9 @@ pub fn start() -> Monitor {
             let gpu_json: Vec<Value> = gpus.iter_mut().map(|g| sample_gpu(g, ac, forced, pkg_temp)).collect();
 
             hist.push("cpu", Some(total));
+            for (i, c) in pct.iter().skip(1).enumerate() {
+                hist.push(&format!("core.{i}"), Some(*c));
+            }
             hist.push("mem", Some(mem_pct));
             hist.push("rx", Some(rxr));
             hist.push("tx", Some(txr));
@@ -621,6 +661,8 @@ pub fn start() -> Monitor {
                 "gpus": gpu_json,
                 "procs": {"count": nproc, "top": top},
                 "history": hist.to_json(),
+                "core_history": hist.cores_json(pct.len().saturating_sub(1)),
+                "sample_ms": interval,
             });
             *out.snapshot.write().unwrap() = snapshot;
         }

@@ -33,7 +33,7 @@ private enum class Tab(val label: String, val icon: ImageVector) {
 fun App() {
     var adding by remember { mutableStateOf(!Hc.paired) }
     if (adding || !Hc.paired) return AddMachineScreen(canCancel = Hc.paired) { adding = false }
-    var tab by remember { mutableStateOf(Tab.Monitor) }
+    var tab by remember { mutableStateOf(Tab.entries.getOrElse(Hc.lastTab) { Tab.Monitor }) }
     var menu by remember { mutableStateOf(false) }
     val m = Hc.cur!!
 
@@ -70,19 +70,19 @@ fun App() {
         bottomBar = {
             NavigationBar {
                 Tab.entries.forEach {
-                    NavigationBarItem(selected = tab == it, onClick = { tab = it }, icon = { Icon(it.icon, it.label) }, label = { Text(it.label, maxLines = 1) })
+                    NavigationBarItem(selected = tab == it, onClick = { tab = it; Hc.setTab(it.ordinal) }, icon = { Icon(it.icon, it.label) }, label = { Text(it.label, maxLines = 1) })
                 }
             }
         },
     ) { pad ->
-        if (tab == Tab.Terminal) {
-            Box(Modifier.padding(pad).fillMaxSize()) { TerminalScreen() }
+        if (tab == Tab.Terminal || tab == Tab.Files) {
+            Box(Modifier.padding(pad).fillMaxSize()) { if (tab == Tab.Terminal) TerminalScreen() else FilesScreen() }
         } else {
             Column(Modifier.padding(pad).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 when (tab) {
                     Tab.Monitor -> MonitorScreen()
                     Tab.Controls -> ControlsScreen()
-                    Tab.Files -> FilesScreen()
+                    Tab.Files -> {}
                     Tab.System -> SystemScreen { adding = true }
                     Tab.Terminal -> {}
                 }

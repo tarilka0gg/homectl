@@ -27,6 +27,20 @@ fun SystemScreen(onAddMachine: () -> Unit) {
     val m = Hc.cur
     var confirm by remember { mutableStateOf<Pair<String, String>?>(null) }
 
+    Section("Settings") {
+        Text("Update speed", style = MaterialTheme.typography.titleSmall)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(500 to "Fast 0.5 s", 1000 to "Normal 1 s", 2000 to "Relaxed 2 s", 5000 to "Slow 5 s").forEach { (ms, label) ->
+                FilterChip(Hc.speedMs == ms, { Hc.setSpeed(ms) }, label = { Text(label) })
+            }
+        }
+        Text(
+            "How often the Monitor refreshes and the machines take new samples. Faster looks smoother but uses more battery, data and CPU on the machine; when the app isn't open, machines sample every 5 s.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+
     Section("Power — ${m?.name ?: ""}") {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             FilledTonalButton({ scope.launch { Hc.post("/api/power/lock") } }) { Text("Lock") }

@@ -29,6 +29,11 @@ class MainActivity : ComponentActivity() {
         setContent { HomectlTheme { App() } }
     }
 
+    override fun onResume() {
+        super.onResume()
+        TerminalHub.resumeAll()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handle(intent)

@@ -12,6 +12,8 @@ import android.net.Uri
 import android.view.HapticFeedbackConstants
 import android.view.inputmethod.InputMethodManager
 import android.webkit.JavascriptInterface
+import android.view.ViewGroup
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.BorderStroke
@@ -47,6 +49,21 @@ object TerminalHub {
     var lastFocused by mutableStateOf<String?>(null)
     @Volatile var imeVisible = false
 
+    /** Bumped when a WebView had to be replaced (its renderer process died), so the screen rebuilds it. */
+    var generation by mutableIntStateOf(0)
+
+    /** Shells each machine offers, fetched ahead of time so the ＋ menu opens instantly. */
+    val shells = mutableStateMapOf<String, List<Pair<String, String>>>()
+
+    suspend fun loadShells(m: Machine) {
+        m.array("/api/term/shells")?.objs()?.map { it.str("path") to it.str("name") }?.takeIf { it.isNotEmpty() }?.let { shells[m.id] = it }
+    }
+
+    /** A page that is already loaded and waiting, so a new session doesn't pay for creating a WebView. */
+    private var spare: WebView? = null
+
+    fun key(m: Machine, sid: String) = "${m.id}/$sid"
+
     fun toggleKeyboard(w: WebView) {
         val imm = w.context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
         if (imeVisible) imm.hideSoftInputFromWindow(w.windowToken, 0) else { w.requestFocus(); imm.showSoftInput(w, 0) }
@@ -54,26 +71,56 @@ object TerminalHub {
 
     fun toggleKeyboardFor(key: String) { views[key]?.let { toggleKeyboard(it) } }
 
-    fun key(m: Machine, sid: String) = "${m.id}/$sid"
-
     @SuppressLint("SetJavaScriptEnabled")
-    fun view(ctx: Context, m: Machine, sid: String): WebView {
-        val k = key(m, sid)
-        views[k]?.let { (it.context as? MutableContextWrapper)?.baseContext = ctx; return it }
-        val w = WebView(MutableContextWrapper(ctx)).apply {
+    private fun create(ctx: Context): WebView {
+        val bridge = Bridge()
+        return WebView(MutableContextWrapper(ctx)).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.textZoom = 100 // the page does its own sizing; the system font scale must not change cell metrics
             settings.setSupportZoom(false)
             setBackgroundColor(0xFF0B0F14.toInt())
-            addJavascriptInterface(Bridge(this, m, sid), "Android")
+            tag = bridge
+            bridge.w = this
+            addJavascriptInterface(bridge, "Android")
             webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView, pageUrl: String?) = start(view, m, sid)
+                override fun onPageFinished(view: WebView, pageUrl: String?) {
+                    bridge.loaded = true
+                    bridge.m?.let { start(view, it, bridge.sid) }
+                }
+
+                /** Android may kill the WebView's renderer while the app is in the background. Without handling this the
+                 *  whole app dies; instead drop the view and rebuild it — the shell is still running on the machine. */
+                override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                    views.entries.firstOrNull { it.value === view }?.key?.let { views.remove(it) }
+                    if (spare === view) spare = null
+                    (view.parent as? ViewGroup)?.removeView(view)
+                    view.destroy()
+                    generation++
+                    return true
+                }
             }
             loadUrl("file:///android_asset/term.html")
         }
+    }
+
+    fun view(ctx: Context, m: Machine, sid: String): WebView {
+        val k = key(m, sid)
+        views[k]?.let { (it.context as? MutableContextWrapper)?.baseContext = ctx; return it }
+        val w = spare?.also { spare = null } ?: create(ctx)
+        (w.context as? MutableContextWrapper)?.baseContext = ctx
+        val b = w.tag as Bridge
+        b.m = m; b.sid = sid; b.key = k
         views[k] = w
+        if (b.loaded) start(w, m, sid)
+        // get the next one ready while the user isn't waiting
+        w.postDelayed({ if (spare == null) spare = create(ctx) }, 400)
         return w
+    }
+
+    /** Called when the screen opens: build the spare ahead of time. */
+    fun warm(ctx: Context) {
+        if (spare == null) spare = create(ctx)
     }
 
     private fun start(w: WebView, m: Machine, sid: String) {
@@ -84,6 +131,11 @@ object TerminalHub {
         }
     }
 
+    /** Back from another app: wake the pages and make sure their sockets are alive. */
+    fun resumeAll() {
+        views.values.forEach { it.onResume(); it.evaluateJavascript("hcResume()", null) }
+    }
+
     fun send(m: Machine, sid: String, text: String) {
         views[key(m, sid)]?.evaluateJavascript("hcSend(${JSONObject.quote(text)})", null)
     }
@@ -92,8 +144,12 @@ object TerminalHub {
         views.remove(key(m, sid))?.destroy()
     }
 
-    private class Bridge(private val w: WebView, private val m: Machine, private val sid: String) {
-        private val k = key(m, sid)
+    private class Bridge {
+        lateinit var w: WebView
+        var m: Machine? = null
+        var sid = ""
+        var key = ""
+        var loaded = false
         private val ctx get() = w.context
 
         @JavascriptInterface fun copy(t: String) {
@@ -110,10 +166,11 @@ object TerminalHub {
         @JavascriptInterface fun toggleKeyboard() { w.post { TerminalHub.toggleKeyboard(w) } }
 
         @JavascriptInterface fun refreshUrl() {
-            scope.launch { m.active = null; m.resolve(); start(w, m, sid) }
+            val mm = m ?: return
+            scope.launch { mm.active = null; mm.resolve(); start(w, mm, sid) }
         }
 
-        @JavascriptInterface fun focused() { scope.launch { lastFocused = k } }
+        @JavascriptInterface fun focused() { scope.launch { lastFocused = key } }
 
         @JavascriptInterface fun tick() { w.post { w.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) } }
     }
@@ -185,7 +242,8 @@ private fun label(list: List<Sess>, s: Sess) = s.name.ifBlank { "shell ${list.in
 fun TerminalScreen() {
     val m = Hc.cur ?: return
     val ctx = LocalContext.current
-    LaunchedEffect(Unit) { TermState.init(ctx) }
+    LaunchedEffect(Unit) { TermState.init(ctx); TerminalHub.warm(ctx) }
+    LaunchedEffect(m.id) { TerminalHub.loadShells(m) }
     var nonce by remember { mutableIntStateOf(0) }
     val sid = TermState.session(m)
     val sessions = sessionsOf(m, nonce)
@@ -204,10 +262,7 @@ fun TerminalScreen() {
                 }
                 item {
                     var newMenu by remember { mutableStateOf(false) }
-                    var shells by remember(m.id) { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
-                    LaunchedEffect(newMenu) {
-                        if (newMenu && shells.isEmpty()) shells = m.array("/api/term/shells")?.objs()?.map { it.str("path") to it.str("name") }.orEmpty()
-                    }
+                    val shells = TerminalHub.shells[m.id].orEmpty()
                     Box {
                         AssistChip({ newMenu = true }, label = { Text("＋") })
                         DropdownMenu(newMenu, { newMenu = false }) {
@@ -237,11 +292,7 @@ fun TerminalScreen() {
             Box {
                 IconButton({ menu = true }) { Icon(Icons.Default.MoreVert, "More") }
                 DropdownMenu(menu, { menu = false }) {
-                    var shellsHere by remember(m.id) { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
-                    LaunchedEffect(menu) {
-                        if (menu && shellsHere.isEmpty()) shellsHere = m.array("/api/term/shells")?.objs()?.map { it.str("path") to it.str("name") }.orEmpty()
-                    }
-                    shellsHere.forEach { (path, name) ->
+                    TerminalHub.shells[m.id].orEmpty().forEach { (path, name) ->
                         DropdownMenuItem(text = { Text("Switch this session to $name") }, onClick = { menu = false; TerminalHub.send(m, sid, "exec $path\n") })
                     }
                     HorizontalDivider()
@@ -313,7 +364,7 @@ fun TerminalScreen() {
 @Composable
 private fun Pane(m: Machine, sid: String, modifier: Modifier) {
     val ctx = LocalContext.current
-    key(m.id, sid) {
+    key(m.id, sid, TerminalHub.generation) {
         AndroidView(factory = { TerminalHub.view(ctx, m, sid) }, modifier = modifier)
     }
 }
