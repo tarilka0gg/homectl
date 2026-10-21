@@ -12,11 +12,11 @@ Control your own computers and smart home from your phone. A small daemon runs o
 
 | Tab | |
 |---|---|
-| **Monitor** | btop-style live view: CPU graph + per-core bars, memory/swap, network and disk I/O, disks, temperatures, battery, GPU state, and a process list you can sort and kill. Several machines (laptop *and* server) show side by side. |
-| **Controls** | Switches that follow the real state: Wi-Fi, Bluetooth and each paired device, airplane mode, mute, public tunnel, webcam toggles. Sliders for volume, screen and monitor brightness. A **mixer** with a volume slider and mute per app, plus output/input device choice. |
-| **Lights** | Govee lights: real on/off, brightness and colour; an "everything" switch. |
-| **Terminal** | A real shell on the selected machine (xterm.js, with Esc/Tab/Ctrl/arrow keys). Type `user@host` and tap **SSH** to hop to any other machine from there. |
-| **System** | Lock / suspend / restart / power off (with confirmation), services as switches, clipboard sync, file send. Share → **homectl** from any app sends files to the machine. |
+| **Monitor** | btop-style live view. CPU graph with per-core load *and temperature*; **each GPU** (iGPU and dGPU: load, VRAM, core/memory clocks, power, temperature, fan, with graphs); temperature graph and sensors (NVMe, DIMM); **fans** with RPM graph; memory/swap; network with **peaks**, totals and per-interface rates; disk I/O with peaks; disks; battery. A full **process table**: tap a column header (PID / NAME / CPU / MEM) to sort, tap again to reverse, search by name, command, user or PID, tap a process to terminate, kill, pause or resume it. Several machines (laptop *and* server) show side by side. |
+| **Controls** | Govee **lights** (real on/off, brightness, colour). Switches that follow the real state: Wi-Fi, Bluetooth and each paired device, airplane mode, public tunnel, webcam toggles. Sliders for screen and monitor brightness. **Audio**: every usable output and input as its own row (volume, mute, pick the default; unplugged ones are hidden), plus a **per-app mixer**. |
+| **Terminal** | A real shell (xterm.js). **Sessions keep running on the machine** — leave the tab, close the app, lose Wi-Fi, and you reattach to the same screen. Multiple session tabs, **split view** (two terminals at once, can be different machines), **SSH** shortcut with history. Two rows of keys (Esc, Tab, Ctrl, Alt, arrows, F1–F12, Ctrl-combos…), keyboard show/hide button, **pinch to zoom** and A−/A+, touch scrolling, long-press to **select** text, Paste, and a **Buffer** view with the whole scrollback — filter it, select any part, or copy the last N lines. |
+| **Files** | Browse the machine's files, **download** to the phone (Downloads/homectl), open or share them, upload from the phone into any folder, make folders. The machines also appear in Android's **own file picker**, so any app (Telegram, Gmail…) can attach files straight from them. |
+| **System** | Lock / suspend / restart / power off (with confirmation), services as switches, clipboard sync, send files. Share → **homectl** from any app sends files to the machine. |
 
 ## Download
 
@@ -53,7 +53,7 @@ The app remembers every address a machine reports and uses the best one that ans
 **Security — please read.** The token gives full control, **including a shell** (Terminal) and power-off. With the tunnel on, that's reachable from the internet, guarded only by the token (192 bits, plus a growing delay after wrong guesses). Pairing by code is refused over the tunnel and rate-limited, and each code allows 5 guesses. Keep the token private, leave the tunnel off unless needed, and set `HOMECTL_NO_TERMINAL=1` to disable the terminal on a machine. Traffic over Tailscale/LAN is plain HTTP inside that network.
 
 ## Notes per machine type
-- **GPU:** only its power state is shown by default. Asking an NVIDIA dGPU for utilisation wakes it and drains a laptop battery; set `HOMECTL_GPU=1` to also read utilisation when it is already awake.
+- **GPU:** Intel and AMD GPUs are read from sysfs. An NVIDIA dGPU is read with `nvidia-smi` **only while it is already awake and the laptop is on AC power** — asking a sleeping card wakes it and drains the battery. On battery the Monitor shows a "read it anyway" switch.
 - **Power / services** use `loginctl`, else `doas -n` (a passwordless doas rule for `poweroff`, `reboot` and `rc-service` is needed on hosts without logind, such as Alpine).
 - **Govee:** enable **LAN Control** for each light in the Govee app.
 
@@ -65,7 +65,10 @@ All routes need `Authorization: Bearer <token>` except `/api/ping` and pairing. 
 
 | Route | |
 |---|---|
-| `GET /api/monitor` | full snapshot + 2-minute history (CPU, memory, network) |
+| `GET /api/monitor[?gpu=1]` | full snapshot (CPU, per-core temps, GPUs, fans, network, disks…) + 2-minute history |
+| `GET /api/procs?sort=&order=&q=&limit=` | the process table (sort by pid/name/user/cpu/mem) |
+| `GET /api/fs/list?path=`, `GET /api/fs/download?path=` (Range ok), `POST /api/fs/upload?dir=&name=`, `POST /api/fs/mkdir` | file browser |
+| `GET /api/term/sessions`, `DELETE …/{id}`, `POST …/{id}/name` | persistent terminal sessions |
 | `GET /api/endpoints`, `GET/POST /api/tunnel` | reachable addresses; public tunnel on/off |
 | `GET /api/mixer`, `POST /api/mixer/{stream,recording,sink,source}/{id}` | per-app and per-device audio (`percent`, `muted`, `default`) |
 | `GET /api/radios`, `GET/POST /api/wifi…`, `/api/bluetooth…` | radios and Bluetooth devices |
@@ -74,7 +77,7 @@ All routes need `Authorization: Bearer <token>` except `/api/ping` and pairing. 
 | `POST /api/power/{lock,suspend,reboot,poweroff}`, `POST /api/procs/{pid}/{term,kill,stop,cont}` | |
 | `GET /api/services`, `POST /api/services/{name}/{start,stop,restart}` | |
 | `GET/POST /api/clipboard`, `POST /api/files/{name}` | clipboard; upload to `~/homectl-inbox/` |
-| `GET /api/term?t=<token>` (WebSocket) | PTY: binary = bytes, text = `{"resize":[cols,rows]}` |
+| `GET /api/term?t=<token>&s=<session>` (WebSocket) | attach to a session (created on first use); replays recent output; binary = bytes, text = `{"resize":[cols,rows]}` |
 | `POST /api/pair/request`, `POST /api/pair/confirm` | code pairing (LAN/tailnet only) |
 
 ## Build from source

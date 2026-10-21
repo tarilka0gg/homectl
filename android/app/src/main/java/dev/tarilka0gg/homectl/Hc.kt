@@ -114,8 +114,45 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         }
     }
 
-    /** WebSocket URL for the terminal on the active address. */
-    fun termUrl(): String? = active?.let { it.url.replaceFirst("http", "ws") + "/api/term?t=$token" }
+    /** WebSocket URL for terminal session [sid] on the active address. */
+    fun termUrl(sid: String): String? = active?.let { it.url.replaceFirst("http", "ws") + "/api/term?t=$token&s=$sid" }
+
+    suspend fun delete(path: String): Boolean = call("DELETE", path) != null
+
+    /** Streams a remote file: [block] gets the stream and its length (-1 if unknown). */
+    suspend fun <T> download(path: String, block: (java.io.InputStream, Long) -> T): T? {
+        val e = active ?: resolve() ?: return null
+        return withContext(Dispatchers.IO) {
+            try {
+                val c = Net.open(e.url, "GET", "/api/fs/download?path=" + Uri.encode(path), token, 6000)
+                c.readTimeout = 60000
+                if (c.responseCode !in 200..299) { c.disconnect(); return@withContext null }
+                val r = c.inputStream.use { block(it, c.contentLengthLong) }
+                c.disconnect()
+                r
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+
+    /** Uploads [uri] into remote directory [dir]; false if the name is taken or the transfer fails. */
+    suspend fun uploadTo(ctx: Context, uri: Uri, dir: String, fileName: String): Boolean {
+        val e = active ?: resolve() ?: return false
+        return withContext(Dispatchers.IO) {
+            try {
+                val c = Net.open(e.url, "POST", "/api/fs/upload?dir=${Uri.encode(dir)}&name=${Uri.encode(fileName)}", token, 5000)
+                c.doOutput = true
+                c.setChunkedStreamingMode(65536)
+                ctx.contentResolver.openInputStream(uri)!!.use { i -> c.outputStream.use { o -> i.copyTo(o) } }
+                val ok = c.responseCode == 201
+                c.disconnect()
+                ok
+            } catch (_: Exception) {
+                false
+            }
+        }
+    }
 }
 
 object Net {
@@ -148,6 +185,9 @@ object Hc {
     private lateinit var prefs: android.content.SharedPreferences
     val machines = mutableStateListOf<Machine>()
     var selectedId by mutableStateOf("")
+
+    /** Read NVIDIA stats even on battery (asks the daemon to, which may keep the dGPU awake). */
+    var gpuLive by mutableStateOf(false)
 
     val paired get() = machines.isNotEmpty()
     val cur: Machine? get() = machines.find { it.id == selectedId } ?: machines.firstOrNull()

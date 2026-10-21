@@ -3,75 +3,289 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <link rel="stylesheet" href="xterm/xterm.css">
 <style>
-  html,body{margin:0;background:#0b0f14;color:#ccc;font:14px sans-serif;overflow:hidden}
+  html,body{margin:0;background:#0b0f14;color:#ccc;font:14px sans-serif;overflow:hidden;-webkit-user-select:none;user-select:none}
   /* html height:100% resolves to 0 in Android WebView, so pin to the viewport instead */
   #wrap{position:fixed;top:0;left:0;right:0;bottom:0;display:flex;flex-direction:column}
-  #term{flex:1;min-height:0;padding:4px}
-  #keys{display:flex;gap:6px;padding:6px;background:#161b22;overflow-x:auto;flex:none}
-  #keys button{flex:none;min-width:44px;padding:9px 10px;border:0;border-radius:8px;background:#2a313c;color:#e6edf3;font:14px monospace}
-  #keys button.on{background:#3b82f6}
-  #msg{position:absolute;top:8px;right:8px;padding:6px 10px;border-radius:8px;background:#7f1d1d;color:#fff;display:none}
+  #term{flex:1;min-height:0;padding:2px 4px;touch-action:none}
+  .keys{display:flex;gap:5px;padding:3px 6px;background:#161b22;overflow-x:auto;flex:none;scrollbar-width:none}
+  .keys::-webkit-scrollbar{display:none}
+  .keys button{flex:none;min-width:40px;padding:8px 9px;border:0;border-radius:8px;background:#2a313c;color:#e6edf3;font:13px monospace;touch-action:manipulation}
+  .keys button.on{background:#3b82f6}
+  .keys button.tool{background:#25303f}
+  /* short panes (split view): keep only the first row of keys, '⋯' brings the tools row back */
+  @media (max-height: 420px){ #keys2{display:none} body.tools #keys2{display:flex} }
+  #msg{position:fixed;top:6px;right:6px;padding:6px 10px;border-radius:8px;background:#7f1d1d;color:#fff;display:none;z-index:5}
+  #toast{position:fixed;bottom:110px;left:50%;transform:translateX(-50%);padding:8px 14px;border-radius:16px;background:#333c;color:#fff;display:none;z-index:6}
+  #buf{position:fixed;top:0;left:0;right:0;bottom:0;background:#0b0f14;display:none;flex-direction:column;z-index:10}
+  #buf .bar{display:flex;gap:6px;padding:6px;background:#161b22;overflow-x:auto;flex:none;align-items:center}
+  #buf .bar button,#buf .bar input{flex:none;padding:8px 10px;border:0;border-radius:8px;background:#2a313c;color:#e6edf3;font:13px sans-serif}
+  #buf .bar input{min-width:120px;background:#0b0f14;border:1px solid #3a4452;-webkit-user-select:text;user-select:text}
+  #bufText{flex:1;min-height:0;width:100%;box-sizing:border-box;border:0;background:#0b0f14;color:#d6dee8;font:12px monospace;padding:6px;resize:none;white-space:pre;overflow:auto;-webkit-user-select:text;user-select:text}
+  #bufInfo{color:#8b98a8;font:12px sans-serif;padding:0 6px;flex:none}
 </style>
 <div id="wrap">
   <div id="term"></div>
-  <div id="keys"></div>
+  <div class="keys" id="keys1"></div>
+  <div class="keys" id="keys2"></div>
 </div>
 <div id="msg"></div>
+<div id="toast"></div>
+<div id="buf">
+  <div class="bar" id="bufbar"></div>
+  <div id="bufInfo"></div>
+  <textarea id="bufText" readonly></textarea>
+</div>
 <script src="xterm/xterm.js"></script>
 <script src="xterm/addon-fit.js"></script>
 <script>
-const term = new Terminal({fontSize: 13, cursorBlink: true, scrollback: 5000, fontFamily: 'monospace',
-  theme: {background: '#0b0f14'}});
-const fit = new FitAddon.FitAddon();
-term.loadAddon(fit);
-term.open(document.getElementById('term'));
-let ws = null, url = null, ctrl = false;
-const enc = new TextEncoder();
-const msg = document.getElementById('msg');
+const B = window.Android || null;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+let fontSize = clamp(parseInt(localStorage.getItem('fs') || '13', 10) || 13, 7, 32);
 
+const term = new Terminal({fontSize, cursorBlink: true, scrollback: 50000, fontFamily: 'monospace',
+  allowProposedApi: true, theme: {background: '#0b0f14'}});
+const fitAddon = new FitAddon.FitAddon();
+term.loadAddon(fitAddon);
+const termEl = document.getElementById('term');
+term.open(termEl);
+
+const msg = document.getElementById('msg');
+const toastEl = document.getElementById('toast');
 function status(t) { msg.textContent = t || ''; msg.style.display = t ? 'block' : 'none'; }
+let toastTimer = null;
+function toast(t) {
+  toastEl.textContent = t; toastEl.style.display = 'block';
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.style.display = 'none', 1600);
+}
+
+// ---------- connection (the session lives on the machine; we just attach) ----------
+let ws = null, url = null, retry = 0, ended = false;
+const enc = new TextEncoder();
+
 function send(s) { if (ws && ws.readyState === 1) ws.send(enc.encode(s)); }
-function resize() {
-  fit.fit();
+
+function fit() {
+  try { fitAddon.fit(); } catch (e) {}
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({resize: [term.cols, term.rows]}));
 }
-window.hcSend = send;
 
-window.hcStart = function (u) {
-  url = u;
-  if (ws) { ws.onclose = null; ws.close(); }
-  fit.fit();
-  ws = new WebSocket(u + '&cols=' + term.cols + '&rows=' + term.rows);
+function connect() {
+  if (!url) return;
+  if (ws) { ws.onclose = null; try { ws.close(); } catch (e) {} }
+  try { fitAddon.fit(); } catch (e) {}
+  ended = false;
+  ws = new WebSocket(url + '&cols=' + term.cols + '&rows=' + term.rows);
   ws.binaryType = 'arraybuffer';
-  ws.onopen = () => { status(''); term.focus(); };
+  ws.onopen = () => { retry = 0; status(''); term.reset(); };
   ws.onmessage = e => term.write(e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data);
-  ws.onclose = () => { status('disconnected — tap to reconnect'); };
-  ws.onerror = () => { status('connection failed — tap to retry'); };
-};
-msg.onclick = () => url && window.hcStart(url);
+  ws.onclose = ev => {
+    if (ev.code === 1005) { ended = true; status('session ended — tap to start a new one'); return; }
+    retry++;
+    status('reconnecting…');
+    if (retry >= 3 && B) B.refreshUrl();
+    setTimeout(connect, Math.min(1000 * retry, 5000));
+  };
+}
+window.hcStart = function (u) { url = u; retry = 0; connect(); };
+window.hcSend = send;
+window.hcPaste = t => term.paste(t);
+msg.onclick = () => { if (ended) connect(); };
 
+// ---------- modifiers ----------
+let ctrl = false, alt = false;
+const btns = {};
+function setMod(name, v) { if (name === 'ctrl') ctrl = v; else alt = v; btns[name].classList.toggle('on', v); }
 term.onData(d => {
   if (ctrl && d.length === 1) {
     const c = d.toUpperCase().charCodeAt(0);
     if (c >= 64 && c <= 95) d = String.fromCharCode(c - 64);
-    setCtrl(false);
+    setMod('ctrl', false);
   }
+  if (alt) { d = '\x1b' + d; setMod('alt', false); }
   send(d);
 });
-window.addEventListener('resize', resize);
-new ResizeObserver(resize).observe(document.getElementById('term'));
+term.textarea && term.textarea.addEventListener('focus', () => { if (B) B.focused(); });
 
-const keysDiv = document.getElementById('keys');
-let ctrlBtn;
-function setCtrl(v) { ctrl = v; ctrlBtn.classList.toggle('on', v); }
-[['Esc', '\x1b'], ['Tab', '\t'], ['Ctrl', null], ['↑', '\x1b[A'], ['↓', '\x1b[B'], ['←', '\x1b[D'], ['→', '\x1b[C'],
- ['|', '|'], ['~', '~'], ['-', '-'], ['/', '/'], ['Home', '\x1b[H'], ['End', '\x1b[F'], ['PgUp', '\x1b[5~'], ['PgDn', '\x1b[6~']]
-  .forEach(([label, seq]) => {
+// ---------- font size / fit ----------
+function setFont(n) {
+  fontSize = clamp(Math.round(n), 7, 32);
+  term.options.fontSize = fontSize;
+  localStorage.setItem('fs', String(fontSize));
+  fit();
+  toast('font ' + fontSize);
+}
+let fitTimer = null;
+new ResizeObserver(() => { clearTimeout(fitTimer); fitTimer = setTimeout(fit, 60); }).observe(termEl);
+
+// ---------- touch: pinch zoom, scroll, long-press select ----------
+const rowsEl = () => termEl.querySelector('.xterm-rows');
+function cell() {
+  const r = rowsEl().getBoundingClientRect();
+  return {rect: r, w: r.width / term.cols, h: r.height / term.rows};
+}
+function cellAt(t) {
+  const c = cell();
+  const col = clamp(Math.floor((t.clientX - c.rect.left) / c.w), 0, term.cols - 1);
+  const row = clamp(Math.floor((t.clientY - c.rect.top) / c.h), 0, term.rows - 1) + term.buffer.active.viewportY;
+  return {col, row};
+}
+function selectRange(a, b) {
+  let s = a, e = b;
+  if (e.row < s.row || (e.row === s.row && e.col < s.col)) { s = b; e = a; }
+  term.select(s.col, s.row, (e.row - s.row) * term.cols + (e.col - s.col) + 1);
+}
+
+let pinch = null, drag = null, anchor = null, selecting = false, lpTimer = null, acc = 0;
+const dist = ts => Math.hypot(ts[0].clientX - ts[1].clientX, ts[0].clientY - ts[1].clientY);
+termEl.addEventListener('touchstart', e => {
+  clearTimeout(lpTimer);
+  if (e.touches.length === 2) {
+    pinch = {d: dist(e.touches), fs: fontSize}; drag = null; selecting = false;
+    e.preventDefault(); return;
+  }
+  const t = e.touches[0];
+  drag = {x: t.clientX, y: t.clientY, t0: Date.now(), moved: false, last: t.clientY};
+  acc = 0;
+  if (selMode) { selecting = true; anchor = cellAt(t); selectRange(anchor, anchor); return; }
+  lpTimer = setTimeout(() => {
+    if (drag && !drag.moved) {
+      selecting = true; anchor = cellAt(t); selectRange(anchor, anchor);
+      if (navigator.vibrate) navigator.vibrate(15);
+      toast('selecting — drag, then tap Copy');
+    }
+  }, 450);
+}, {passive: false});
+termEl.addEventListener('touchmove', e => {
+  if (pinch && e.touches.length === 2) {
+    setFontLive(pinch.fs * dist(e.touches) / pinch.d);
+    e.preventDefault(); return;
+  }
+  if (!drag) return;
+  const t = e.touches[0];
+  if (Math.hypot(t.clientX - drag.x, t.clientY - drag.y) > 8) drag.moved = true;
+  if (selecting) { selectRange(anchor, cellAt(t)); e.preventDefault(); return; }
+  if (drag.moved) {
+    clearTimeout(lpTimer);
+    acc += drag.last - t.clientY; drag.last = t.clientY;
+    const h = cell().h, lines = Math.trunc(acc / h);
+    if (lines) { term.scrollLines(lines); acc -= lines * h; }
+    e.preventDefault();
+  }
+}, {passive: false});
+let liveTimer = null;
+function setFontLive(n) {
+  n = clamp(Math.round(n), 7, 32);
+  if (n === fontSize) return;
+  fontSize = n; term.options.fontSize = n; localStorage.setItem('fs', String(n));
+  clearTimeout(liveTimer); liveTimer = setTimeout(() => { fit(); toast('font ' + n); }, 80);
+}
+termEl.addEventListener('touchend', e => {
+  clearTimeout(lpTimer);
+  if (e.touches.length === 0) {
+    if (pinch) { pinch = null; drag = null; return; }
+    if (drag && !drag.moved && !selecting && Date.now() - drag.t0 < 400) {
+      if (ended) connect(); else { term.focus(); if (B) B.showKeyboard(); }
+    }
+    selecting = false; drag = null;
+  }
+});
+
+// ---------- buffer view: everything in scrollback, filterable, with copy-last-N ----------
+const bufEl = document.getElementById('buf'), bufText = document.getElementById('bufText'), bufInfo = document.getElementById('bufInfo');
+let bufLines = [];
+function collectLines() {
+  const b = term.buffer.normal, lines = [];
+  for (let i = 0; i < b.length; i++) {
+    const l = b.getLine(i); if (!l) continue;
+    const s = l.translateToString(true);
+    if (l.isWrapped && lines.length) lines[lines.length - 1] += s; else lines.push(s);
+  }
+  while (lines.length && lines[lines.length - 1] === '') lines.pop();
+  return lines;
+}
+let filterBox;
+function shownLines() {
+  const q = filterBox.value.toLowerCase();
+  return q ? bufLines.filter(l => l.toLowerCase().includes(q)) : bufLines;
+}
+function renderBuf(toBottom) {
+  const sh = shownLines();
+  bufText.value = sh.join('\n');
+  bufInfo.textContent = sh.length + ' of ' + bufLines.length + ' lines — long-press text to select, or use the buttons';
+  if (toBottom) bufText.scrollTop = bufText.scrollHeight;
+}
+function copyText(t, what) {
+  if (B) B.copy(t); else if (navigator.clipboard) navigator.clipboard.writeText(t);
+  toast('copied ' + what);
+}
+function openBuffer() {
+  bufLines = collectLines();
+  bufEl.style.display = 'flex';
+  renderBuf(true);
+}
+(function buildBufBar() {
+  const bar = document.getElementById('bufbar');
+  const add = (label, fn) => { const b = document.createElement('button'); b.textContent = label; b.onclick = fn; bar.appendChild(b); };
+  add('✕ Close', () => { bufEl.style.display = 'none'; term.focus(); });
+  add('Copy all', () => copyText(shownLines().join('\n'), shownLines().length + ' lines'));
+  [20, 100, 500, 2000].forEach(n => add('Last ' + n, () => { const sh = shownLines(); copyText(sh.slice(-n).join('\n'), Math.min(n, sh.length) + ' lines'); }));
+  add('Select all', () => { bufText.focus(); bufText.select(); });
+  add('⤒ Top', () => bufText.scrollTop = 0);
+  add('⤓ Bottom', () => bufText.scrollTop = bufText.scrollHeight);
+  filterBox = document.createElement('input');
+  filterBox.placeholder = 'filter lines…';
+  filterBox.oninput = () => renderBuf(true);
+  bar.appendChild(filterBox);
+})();
+
+// ---------- key rows ----------
+let selMode = false;
+const actions = {
+  ctrl: () => setMod('ctrl', !ctrl),
+  alt: () => setMod('alt', !alt),
+  kb: () => { term.focus(); if (B) B.toggleKeyboard(); },
+  paste: () => { const t = B ? B.paste() : ''; if (t) term.paste(t); else toast('clipboard is empty'); },
+  copy: () => {
+    const t = term.getSelection();
+    if (t) { copyText(t, t.length + ' chars'); term.clearSelection(); }
+    else toast('nothing selected — long-press text to select');
+  },
+  sel: () => { selMode = !selMode; btns.sel.classList.toggle('on', selMode); toast(selMode ? 'drag to select' : 'select off'); },
+  buf: openBuffer,
+  fm: () => setFont(fontSize - 1),
+  fp: () => setFont(fontSize + 1),
+  fit: () => { fit(); toast(term.cols + '×' + term.rows); },
+  bottom: () => term.scrollToBottom(),
+  clear: () => { term.clear(); send('\x0c'); },
+  more: () => { document.body.classList.toggle('tools'); fit(); },
+};
+const row1 = [['⋯', 'more', 0, 1], ['Esc', '\x1b'], ['Tab', '\t'], ['Ctrl', 'ctrl'], ['Alt', 'alt'], ['↑', '\x1b[A', 1], ['↓', '\x1b[B', 1], ['←', '\x1b[D', 1], ['→', '\x1b[C', 1],
+  ['Home', '\x1b[H'], ['End', '\x1b[F'], ['PgUp', '\x1b[5~', 1], ['PgDn', '\x1b[6~', 1], ['Del', '\x1b[3~', 1], ['|', '|'], ['~', '~'], ['/', '/'], ['-', '-'], ['_', '_'], ['\\', '\\'], ['$', '$'], ['&', '&'], ['*', '*'],
+  ['F1', '\x1bOP'], ['F2', '\x1bOQ'], ['F3', '\x1bOR'], ['F4', '\x1bOS'], ['F5', '\x1b[15~'], ['F6', '\x1b[17~'], ['F7', '\x1b[18~'], ['F8', '\x1b[19~'], ['F9', '\x1b[20~'], ['F10', '\x1b[21~'], ['F11', '\x1b[23~'], ['F12', '\x1b[24~']];
+const row2 = [['⌨', 'kb', 0, 1], ['Paste', 'paste', 0, 1], ['Copy', 'copy', 0, 1], ['Select', 'sel', 0, 1], ['Buffer', 'buf', 0, 1], ['A−', 'fm', 1, 1], ['A+', 'fp', 1, 1], ['Fit', 'fit', 0, 1], ['⇣', 'bottom', 0, 1],
+  ['^C', '\x03'], ['^D', '\x04'], ['^Z', '\x1a'], ['^L', '\x0c'], ['^R', '\x12'], ['^A', '\x01'], ['^E', '\x05'], ['^W', '\x17'], ['^U', '\x15'], ['Clear', 'clear', 0, 1]];
+
+function build(rowEl, defs) {
+  defs.forEach(([label, v, repeat, tool]) => {
     const b = document.createElement('button');
     b.textContent = label;
-    b.addEventListener('touchstart', e => e.preventDefault(), {passive: false});
-    b.onclick = () => { if (seq === null) setCtrl(!ctrl); else { send(seq); } term.focus(); };
-    if (seq === null) ctrlBtn = b;
-    keysDiv.appendChild(b);
+    if (tool) b.classList.add('tool');
+    const key = typeof v === 'string' && actions[v] ? v : null;
+    if (key === 'ctrl' || key === 'alt' || key === 'sel') btns[key] = b;
+    const run = () => { if (key) actions[key](); else { if (alt) { send('\x1b' + v); setMod('alt', false); } else send(v); } };
+    // Fire on release (so swiping the row doesn't press keys); hold to repeat for navigation keys.
+    let sx = 0, sy = 0, moved = false, hold = null, rep = null;
+    const stop = () => { clearTimeout(hold); clearInterval(rep); };
+    b.addEventListener('pointerdown', e => {
+      sx = e.clientX; sy = e.clientY; moved = false; e.preventDefault();
+      if (repeat) hold = setTimeout(() => { rep = setInterval(() => { if (!moved) { run(); if (B) B.tick(); } }, 55); }, 380);
+    });
+    b.addEventListener('pointermove', e => { if (Math.hypot(e.clientX - sx, e.clientY - sy) > 10) { moved = true; stop(); } });
+    b.addEventListener('pointerup', () => { const wasRepeating = !!rep; stop(); if (!moved && !wasRepeating) { run(); if (B) B.tick(); } });
+    b.addEventListener('pointercancel', stop);
+    rowEl.appendChild(b);
   });
+}
+build(document.getElementById('keys1'), row1);
+build(document.getElementById('keys2'), row2);
 </script>

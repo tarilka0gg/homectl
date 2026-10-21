@@ -24,8 +24,8 @@ import org.json.JSONObject
 private enum class Tab(val label: String, val icon: ImageVector) {
     Monitor("Monitor", Icons.Default.Info),
     Controls("Controls", Icons.Default.Settings),
-    Lights("Lights", Icons.Default.Star),
     Terminal("Terminal", Icons.Default.PlayArrow),
+    Files("Files", Icons.Default.Menu),
     System("System", Icons.Default.Build),
 }
 
@@ -82,7 +82,7 @@ fun App() {
                 when (tab) {
                     Tab.Monitor -> MonitorScreen()
                     Tab.Controls -> ControlsScreen()
-                    Tab.Lights -> LightsScreen()
+                    Tab.Files -> FilesScreen()
                     Tab.System -> SystemScreen { adding = true }
                     Tab.Terminal -> {}
                 }

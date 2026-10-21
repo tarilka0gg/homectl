@@ -28,6 +28,8 @@ fun ControlsScreen() {
     val cam = loaded(nonce, 10000) { Hc.array("/api/webcam/0") }
     val tunnel = loaded(nonce, 6000) { Hc.json("/api/tunnel") }
 
+    LightsScreen()
+
     Section("Connectivity") {
         val r = radios.value
         if (r == null) Text("Loading…") else {
@@ -48,28 +50,35 @@ fun ControlsScreen() {
         }
     }
 
-    Section("Sound") {
-        val m = mixer.value
-        if (m == null) Text("Loading…") else {
-            for ((kind, devKey, label) in listOf(Triple("sink", "sinks", "Output"), Triple("source", "sources", "Input"))) {
-                val list = m.getJSONArray(devKey).objs()
-                val def = list.firstOrNull { it.optBoolean("default") } ?: list.firstOrNull()
-                if (def != null) {
-                    SliderRow("$label · ${def.str("desc")}", def.optInt("percent").toFloat(), 150f) { v -> act { Hc.post("/api/mixer/$kind/${def.str("name")}", body("percent" to v)) } }
-                    SwitchRow("$label muted", def.optBoolean("muted")) { on -> act { Hc.post("/api/mixer/$kind/${def.str("name")}", body("muted" to on)) } }
-                    if (list.size > 1) {
-                        var open by remember(kind) { mutableStateOf(false) }
-                        Box {
-                            OutlinedButton({ open = true }) { Text("Change ${label.lowercase()} device") }
-                            DropdownMenu(open, { open = false }) {
-                                list.forEach { s ->
-                                    DropdownMenuItem(
-                                        text = { Text(s.str("desc") + if (s === def) "  ✓" else "") },
-                                        onClick = { open = false; act { Hc.post("/api/mixer/$kind/${s.str("name")}", body("default" to true)) } },
-                                    )
-                                }
-                            }
+    var showHidden by remember { mutableStateOf(false) }
+    for ((kind, devKey, title) in listOf(Triple("sink", "sinks", "Outputs"), Triple("source", "sources", "Inputs"))) {
+        val all = mixer.value?.getJSONArray(devKey)?.objs().orEmpty().filter { it.str("name").isNotBlank() && it.str("desc") != "(null)" }
+        val usable = all.filter { it.optBoolean("available", true) }
+        val hidden = all.size - usable.size
+        Section(title, trailing = {
+            if (hidden > 0) TextButton({ showHidden = !showHidden }) { Text(if (showHidden) "Hide $hidden unplugged" else "$hidden unplugged hidden") }
+        }) {
+            if (mixer.value == null) Text("Loading…")
+            else if (usable.isEmpty()) Text("Nothing usable right now.", style = MaterialTheme.typography.bodyMedium)
+            (if (showHidden) all else usable).forEach { dev ->
+                val name = dev.str("name")
+                val isDef = dev.optBoolean("default")
+                val ok = dev.optBoolean("available", true)
+                Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(isDef, { act { Hc.post("/api/mixer/$kind/$name", body("default" to true)) } }, enabled = ok)
+                        Column(Modifier.weight(1f)) {
+                            Text(dev.str("desc"), style = MaterialTheme.typography.bodyLarge, maxLines = 2)
+                            Text(
+                                when { !ok -> "unplugged"; isDef -> "in use" else -> "tap the circle to switch to it" },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
+                        Switch(!dev.optBoolean("muted"), { on -> act { Hc.post("/api/mixer/$kind/$name", body("muted" to !on)) } }, enabled = ok)
+                    }
+                    SliderRow(if (dev.optBoolean("muted")) "muted" else "volume", dev.optInt("percent").toFloat(), 150f, enabled = ok) { v ->
+                        act { Hc.post("/api/mixer/$kind/$name", body("percent" to v)) }
                     }
                 }
             }
@@ -129,7 +138,7 @@ private fun AppStream(s: JSONObject, kind: String, act: (Long, suspend () -> Uni
     val id = s.getInt("id")
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            SliderRow(s.str("app"), s.optInt("percent").toFloat(), 150f) { v -> act(300) { Hc.post("/api/mixer/$kind/$id", body("percent" to v)) } }
+            SliderRow(s.str("app") + s.str("title").takeIf { it.isNotBlank() && it != s.str("app") && it != "(null)" }?.let { " — ${it.take(36)}" }.orEmpty(), s.optInt("percent").toFloat(), 150f) { v -> act(300) { Hc.post("/api/mixer/$kind/$id", body("percent" to v)) } }
         }
         Switch(!s.optBoolean("muted"), { on -> act(300) { Hc.post("/api/mixer/$kind/$id", body("muted" to !on)) } }, Modifier.padding(start = 12.dp))
     }

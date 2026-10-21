@@ -107,7 +107,7 @@ fun Bar(fraction: Float, color: Color, modifier: Modifier = Modifier, height: Dp
 
 /** Line chart of the last samples; several series share one scale. */
 @Composable
-fun Spark(series: List<List<Float>>, colors: List<Color>, modifier: Modifier = Modifier, max: Float? = null, height: Dp = 56.dp) {
+fun Spark(series: List<List<Float>>, colors: List<Color>, modifier: Modifier = Modifier, max: Float? = null, min: Float = 0f, height: Dp = 56.dp) {
     val track = MaterialTheme.colorScheme.surfaceVariant
     Canvas(modifier.fillMaxWidth().height(height).background(track.copy(alpha = 0.35f), RoundedCornerShape(8.dp))) {
         val top = max ?: (series.flatten().maxOrNull() ?: 1f).coerceAtLeast(1f)
@@ -116,7 +116,7 @@ fun Spark(series: List<List<Float>>, colors: List<Color>, modifier: Modifier = M
             val path = Path()
             vals.forEachIndexed { i, v ->
                 val x = size.width * i / (vals.size - 1)
-                val y = size.height - size.height * (v / top).coerceIn(0f, 1f)
+                val y = size.height - size.height * ((v - min) / (top - min).coerceAtLeast(0.001f)).coerceIn(0f, 1f)
                 if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
             }
             if (si == 0) {
@@ -140,3 +140,21 @@ fun Legend(label: String, color: Color) {
         Text(label, style = MaterialTheme.typography.labelMedium)
     }
 }
+
+/** A [Spark] with its scale printed in the corner, so peaks are readable. */
+@Composable
+fun Chart(series: List<List<Float>>, colors: List<Color>, fmt: (Float) -> String, max: Float? = null, height: Dp = 64.dp, autoMin: Boolean = false) {
+    val top = max ?: (series.flatten().maxOrNull() ?: 0f)
+    val lo = if (autoMin) ((series.flatten().minOrNull() ?: 0f) - (top - (series.flatten().minOrNull() ?: 0f)) * 0.15f - 1f).coerceAtLeast(0f) else 0f
+    Box {
+        Spark(series, colors, max = max ?: top.coerceAtLeast(1f), min = lo, height = height)
+        Text(
+            "max ${fmt(top)}",
+            Modifier.align(Alignment.TopStart).padding(start = 6.dp, top = 2.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+fun JSONObject.series(k: String): List<Float> = optJSONArray(k)?.floats().orEmpty()

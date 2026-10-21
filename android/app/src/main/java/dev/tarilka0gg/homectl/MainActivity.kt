@@ -19,6 +19,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         Hc.init(this)
         handle(intent)
+        // The soft keyboard resizes the window; compare the visible area with the screen to know if it is up.
+        val root = window.decorView
+        root.viewTreeObserver.addOnGlobalLayoutListener {
+            val r = android.graphics.Rect()
+            root.getWindowVisibleDisplayFrame(r)
+            TerminalHub.imeVisible = r.bottom < resources.displayMetrics.heightPixels * 0.8
+        }
         setContent { HomectlTheme { App() } }
     }
 

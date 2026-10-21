@@ -2,25 +2,33 @@
 
 package dev.tarilka0gg.homectl
 
+import android.net.Uri
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
+private val rxColor = Color(0xFF4CAF50)
+private val txColor = Color(0xFFFF9800)
+private val tempColor = Color(0xFFE53935)
+private val fanColors = listOf(Color(0xFF29B6F6), Color(0xFFAB47BC), Color(0xFF26A69A), Color(0xFFFFCA28))
+
 @Composable
 fun MonitorScreen() {
-    val data = loaded(Unit, 1500) { Hc.json("/api/monitor") }
+    val data = loaded(Hc.gpuLive, 1500) { Hc.json(if (Hc.gpuLive) "/api/monitor?gpu=1" else "/api/monitor") }
     val scope = rememberCoroutineScope()
     if (Hc.machines.size > 1) Fleet()
     val d = data.value
@@ -30,7 +38,7 @@ fun MonitorScreen() {
     }
     val info = d.getJSONObject("info")
     val cpu = d.getJSONObject("cpu")
-    val mem = d.getJSONObject("mem")
+    val mem = d.optJSONObject("mem") ?: JSONObject()
     val hist = d.getJSONObject("history")
     val primary = MaterialTheme.colorScheme.primary
     val tertiary = MaterialTheme.colorScheme.tertiary
@@ -38,48 +46,57 @@ fun MonitorScreen() {
     Section(info.str("hostname"), trailing = { Text("up ${fmtUptime(d.optLong("uptime_s"))}", style = MaterialTheme.typography.labelLarge) }) {
         Text("${info.str("os")} · ${info.str("kernel")}", style = MaterialTheme.typography.bodySmall)
         Text(info.str("cpu_model"), style = MaterialTheme.typography.bodySmall)
-        val load = d.getJSONArray("load").floats()
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val load = d.getJSONArray("load").floats()
             if (load.size == 3) AssistChip({}, label = { Text("load ${load.joinToString(" ") { "%.2f".format(it) }}") })
             if (!cpu.isNull("temp")) AssistChip({}, label = { Text("CPU ${"%.0f".format(cpu.getDouble("temp"))}°C") })
-            d.optJSONObject("temps")?.takeIf { !it.isNull("nvme") }?.let { AssistChip({}, label = { Text("NVMe ${"%.0f".format(it.getDouble("nvme"))}°C") }) }
             d.optJSONObject("battery")?.let { b ->
                 AssistChip({}, label = { Text("🔋 ${b.optInt("percent")}% ${b.str("status")}${if (!b.isNull("watts")) " ${"%.1f".format(b.getDouble("watts"))} W" else ""}") })
-            }
-            d.optJSONObject("gpu")?.let { g ->
-                val label = if (g.has("util")) "GPU ${g.optInt("util")}% ${g.optInt("temp")}°C" else "GPU ${g.str("state")}"
-                AssistChip({}, label = { Text(label) })
             }
         }
     }
 
+    // ---- CPU ----
     val total = cpu.getDouble("total").toFloat()
+    val cores = cpu.optJSONArray("cores")?.floats().orEmpty()
+    val coreTemps = cpu.optJSONArray("core_temps")
+    val coreFreqs = cpu.optJSONArray("core_freqs")
     Section("CPU  ${"%.0f".format(total)}%", trailing = {
-        Text("${"%.1f".format(cpu.optDouble("freq_mhz") / 1000)} GHz", style = MaterialTheme.typography.labelLarge)
+        Text("${"%.2f".format(cpu.optDouble("freq_mhz") / 1000)} GHz avg · ${"%.2f".format(cpu.optDouble("freq_max_mhz") / 1000)} max", style = MaterialTheme.typography.labelMedium)
     }) {
-        Spark(listOf(hist.getJSONArray("cpu").floats()), listOf(primary), max = 100f)
-        val cores = cpu.getJSONArray("cores").floats()
+        Chart(listOf(hist.series("cpu")), listOf(primary), { "%.0f%%".format(it) }, max = 100f)
         cores.withIndex().chunked(2).forEach { pair ->
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 pair.forEach { (i, p) ->
-                    Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text("$i".padStart(2), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
                         Bar(p / 100f, heat(p), Modifier.weight(1f), 6.dp)
-                        Text("${p.toInt()}".padStart(3), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+                        Text("${p.toInt()}%".padStart(4), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+                        val t = coreTemps?.let { if (i < it.length() && !it.isNull(i)) it.getDouble(i) else null }
+                        if (t != null) Text("${t.toInt()}°", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, color = heat(((t - 30) * 100 / 70).toFloat()))
                     }
                 }
                 if (pair.size == 1) Spacer(Modifier.weight(1f))
             }
         }
+        coreFreqs?.let { f ->
+            val fl = f.floats()
+            if (fl.isNotEmpty()) Text("clock: min ${"%.0f".format(fl.min())} · max ${"%.0f".format(fl.max())} MHz across ${fl.size} threads", style = MaterialTheme.typography.bodySmall)
+        }
     }
 
+    // ---- GPUs ----
+    val gpus = d.optJSONArray("gpus")?.objs().orEmpty()
+    gpus.forEach { g -> GpuCard(g, hist) }
+
+    // ---- memory ----
     val mt = mem.getDouble("total")
     val used = mt - mem.getDouble("available")
     val swapT = mem.getDouble("swap_total")
     Section("Memory  ${"%.0f".format(100 * used / mt)}%", trailing = { Text("${fmtBytes(used)} / ${fmtBytes(mt)}", style = MaterialTheme.typography.labelLarge) }) {
-        Spark(listOf(hist.getJSONArray("mem").floats()), listOf(tertiary), max = 100f)
+        Chart(listOf(hist.series("mem")), listOf(tertiary), { "%.0f%%".format(it) }, max = 100f)
         Bar((used / mt).toFloat(), heat((100 * used / mt).toFloat()))
-        Text("cached ${fmtBytes(mem.getDouble("cached"))}", style = MaterialTheme.typography.bodySmall)
+        Text("cached ${fmtBytes(mem.getDouble("cached"))} · buffers ${fmtBytes(mem.optDouble("buffers"))}", style = MaterialTheme.typography.bodySmall)
         if (swapT > 0) {
             val su = swapT - mem.getDouble("swap_free")
             Text("swap ${fmtBytes(su)} / ${fmtBytes(swapT)}", style = MaterialTheme.typography.bodySmall)
@@ -87,20 +104,64 @@ fun MonitorScreen() {
         }
     }
 
-    val net = d.getJSONObject("net")
-    val io = d.getJSONObject("disk_io")
-    val rxC = Color(0xFF4CAF50)
-    val txC = Color(0xFFFF9800)
-    Section("Network & disk I/O") {
-        Spark(listOf(hist.getJSONArray("rx").floats(), hist.getJSONArray("tx").floats()), listOf(rxC, txC))
-        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            Legend("▼ ${fmtRate(net.getDouble("rx_bps"))}", rxC)
-            Legend("▲ ${fmtRate(net.getDouble("tx_bps"))}", txC)
+    // ---- temperatures and fans ----
+    val temps = d.optJSONArray("temps")?.objs().orEmpty()
+    val tempSeries = buildList {
+        hist.series("temp.cpu").takeIf { it.isNotEmpty() }?.let { add("CPU" to it) }
+        gpus.forEach { g -> hist.series("${g.str("id")}.temp").takeIf { it.isNotEmpty() && g.str("kind") == "discrete" }?.let { add("GPU" to it) } }
+    }
+    if (tempSeries.isNotEmpty() || temps.isNotEmpty()) Section("Temperatures") {
+        if (tempSeries.isNotEmpty()) {
+            Chart(tempSeries.map { it.second }, listOf(tempColor, Color(0xFF7E57C2)), { "%.0f°C".format(it) }, autoMin = true)
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                tempSeries.forEachIndexed { i, (n, v) -> Legend("$n ${"%.0f".format(v.lastOrNull() ?: 0f)}°C", listOf(tempColor, Color(0xFF7E57C2))[i]) }
+            }
         }
-        Text("disk read ${fmtRate(io.getDouble("read_bps"))} · write ${fmtRate(io.getDouble("write_bps"))}", style = MaterialTheme.typography.bodySmall)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            temps.forEach { t -> AssistChip({}, label = { Text("${t.str("label").replace("nvme ", "NVMe ").replace("spd5118 temp1", "DIMM")} ${"%.0f".format(t.getDouble("value"))}°") }) }
+        }
+    }
+    val fans = d.optJSONArray("fans")?.objs().orEmpty()
+    if (fans.isNotEmpty()) Section("Fans") {
+        Chart(fans.indices.map { hist.series("fan.$it") }, fanColors, { "%.0f rpm".format(it) }, autoMin = true)
+        fans.forEachIndexed { i, f ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Legend(f.str("name"), fanColors[i % fanColors.size])
+                Text("${"%.0f".format(f.getDouble("rpm"))} rpm" + if (!f.isNull("pwm")) " · ${"%.0f".format(f.getDouble("pwm"))}%" else "", style = MaterialTheme.typography.labelLarge)
+            }
+        }
     }
 
-    val disks = d.getJSONArray("disks").objs()
+    // ---- network and disk I/O ----
+    val net = d.getJSONObject("net")
+    val io = d.getJSONObject("disk_io")
+    Section("Network") {
+        Chart(listOf(hist.series("rx"), hist.series("tx")), listOf(rxColor, txColor), { fmtRate(it.toDouble()) })
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Legend("▼ ${fmtRate(net.getDouble("rx_bps"))}", rxColor)
+            Legend("▲ ${fmtRate(net.getDouble("tx_bps"))}", txColor)
+        }
+        if (net.has("rx_peak")) {
+            Text("peak since start: ▼ ${fmtRate(net.optDouble("rx_peak"))} · ▲ ${fmtRate(net.optDouble("tx_peak"))}", style = MaterialTheme.typography.bodySmall)
+            Text("total since boot: ▼ ${fmtBytes(net.optDouble("rx_total"))} · ▲ ${fmtBytes(net.optDouble("tx_total"))}", style = MaterialTheme.typography.bodySmall)
+        }
+        net.optJSONArray("ifaces")?.objs().orEmpty().forEach { i ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(i.str("name"), style = MaterialTheme.typography.bodyMedium)
+                Text("▼ ${fmtRate(i.optDouble("rx_bps"))}  ▲ ${fmtRate(i.optDouble("tx_bps"))}", style = MaterialTheme.typography.labelMedium, fontFamily = FontFamily.Monospace)
+            }
+        }
+    }
+    Section("Disk I/O") {
+        Chart(listOf(hist.series("dr"), hist.series("dw")), listOf(rxColor, txColor), { fmtRate(it.toDouble()) })
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Legend("read ${fmtRate(io.getDouble("read_bps"))}", rxColor)
+            Legend("write ${fmtRate(io.getDouble("write_bps"))}", txColor)
+        }
+        if (io.has("read_peak")) Text("peak: read ${fmtRate(io.optDouble("read_peak"))} · write ${fmtRate(io.optDouble("write_peak"))}", style = MaterialTheme.typography.bodySmall)
+    }
+
+    val disks = d.optJSONArray("disks")?.objs().orEmpty()
     if (disks.isNotEmpty()) Section("Disks") {
         disks.forEach { k ->
             val t = k.getDouble("total")
@@ -113,41 +174,118 @@ fun MonitorScreen() {
         }
     }
 
-    Processes(d.getJSONObject("procs"), scope)
+    Processes(d.optJSONObject("procs")?.optInt("count") ?: 0, scope)
 }
 
 @Composable
-private fun Processes(procs: JSONObject, scope: kotlinx.coroutines.CoroutineScope) {
-    var sortCpu by remember { mutableStateOf(true) }
-    var selected by remember { mutableStateOf<JSONObject?>(null) }
-    val rows = procs.getJSONArray("top").objs().sortedByDescending { if (sortCpu) it.getDouble("cpu") else it.getDouble("mem") }.take(15)
-    Section("Processes  (${procs.optInt("count")})", trailing = {
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            FilterChip(sortCpu, { sortCpu = true }, label = { Text("CPU") })
-            FilterChip(!sortCpu, { sortCpu = false }, label = { Text("MEM") })
-        }
+private fun GpuCard(g: JSONObject, hist: JSONObject) {
+    val id = g.str("id")
+    val live = g.optBoolean("live")
+    val integrated = g.str("kind") == "integrated"
+    val c = MaterialTheme.colorScheme.primary
+    Section(g.str("name").replace("NVIDIA GeForce ", "").replace("Laptop GPU", "").trim().ifBlank { "GPU" }, trailing = {
+        AssistChip({}, label = { Text("${if (integrated) "iGPU" else "dGPU"} · ${g.str("state")}${g.str("pstate").let { if (it.isBlank()) "" else " · $it" }}") })
     }) {
-        Row(Modifier.fillMaxWidth()) {
-            Text("PID", Modifier.width(76.dp), style = MaterialTheme.typography.labelSmall)
-            Text("NAME", Modifier.weight(1f), style = MaterialTheme.typography.labelSmall)
-            Text("CPU%", Modifier.width(52.dp), style = MaterialTheme.typography.labelSmall)
-            Text("MEM", Modifier.width(72.dp), style = MaterialTheme.typography.labelSmall)
-        }
-        rows.forEach { p ->
-            Row(Modifier.fillMaxWidth().clickable { selected = p }.padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("${p.getInt("pid")}", Modifier.width(76.dp), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                Text(p.str("name"), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("%.1f".format(p.getDouble("cpu")), Modifier.width(52.dp), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, color = heat(p.getDouble("cpu").toFloat().coerceAtMost(100f)))
-                Text(fmtBytes(p.getDouble("mem")), Modifier.width(72.dp), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+        val note = g.str("note")
+        if (note.isNotBlank()) {
+            Text(note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (g.str("vendor") == "nvidia" && g.str("state") == "active" && note.contains("battery")) {
+                SwitchRow("Read it anyway (may stop it sleeping)", Hc.gpuLive) { Hc.gpuLive = it }
             }
         }
+        if (!g.isNull("util")) {
+            Text("Load ${"%.0f".format(g.getDouble("util"))}%", style = MaterialTheme.typography.titleSmall)
+            Chart(listOf(hist.series("$id.util")), listOf(c), { "%.0f%%".format(it) }, max = 100f, height = 48.dp)
+        }
+        if (g.optBoolean("shared_memory")) {
+            Text("Memory: shared with system RAM", style = MaterialTheme.typography.bodySmall)
+        } else if (!g.isNull("mem_total")) {
+            val u = g.optDouble("mem_used")
+            val t = g.getDouble("mem_total")
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("VRAM", style = MaterialTheme.typography.bodyMedium)
+                Text("${fmtBytes(u)} / ${fmtBytes(t)}", style = MaterialTheme.typography.labelMedium)
+            }
+            Bar((u / t).toFloat(), heat((100 * u / t).toFloat()))
+        }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (!g.isNull("clock_mhz")) AssistChip({}, label = { Text("core ${"%.0f".format(g.getDouble("clock_mhz"))}${if (!g.isNull("clock_max_mhz")) " / ${"%.0f".format(g.getDouble("clock_max_mhz"))}" else ""} MHz") })
+            if (!g.isNull("mem_clock_mhz")) AssistChip({}, label = { Text("mem ${"%.0f".format(g.getDouble("mem_clock_mhz"))} MHz") })
+            if (!g.isNull("power_w")) AssistChip({}, label = { Text("${"%.1f".format(g.getDouble("power_w"))}${if (!g.isNull("power_limit_w")) " / ${"%.0f".format(g.getDouble("power_limit_w"))}" else ""} W") })
+            if (!g.isNull("temp")) AssistChip({}, label = { Text("${"%.0f".format(g.getDouble("temp"))}°C${if (integrated) " (package)" else ""}") })
+            if (!g.isNull("fan_pct")) AssistChip({}, label = { Text("fan ${"%.0f".format(g.getDouble("fan_pct"))}%") })
+            if (!g.isNull("fan_rpm")) AssistChip({}, label = { Text("fan ${"%.0f".format(g.getDouble("fan_rpm"))} rpm") })
+        }
+        if (live) {
+            val clock = hist.series("$id.clock")
+            if (clock.size > 1) { Text("Clock", style = MaterialTheme.typography.labelMedium); Chart(listOf(clock), listOf(Color(0xFF26A69A)), { "%.0f MHz".format(it) }, height = 40.dp, autoMin = true) }
+            val power = hist.series("$id.power")
+            if (power.size > 1) { Text("Power", style = MaterialTheme.typography.labelMedium); Chart(listOf(power), listOf(Color(0xFFFFA726)), { "%.1f W".format(it) }, height = 40.dp, autoMin = true) }
+            val temp = hist.series("$id.temp")
+            if (temp.size > 1 && !integrated) { Text("Temperature", style = MaterialTheme.typography.labelMedium); Chart(listOf(temp), listOf(tempColor), { "%.0f°C".format(it) }, height = 40.dp, autoMin = true) }
+            val vram = hist.series("$id.vram")
+            if (vram.size > 1 && !g.isNull("mem_total")) { Text("VRAM", style = MaterialTheme.typography.labelMedium); Chart(listOf(vram), listOf(Color(0xFF7E57C2)), { fmtBytes(it.toDouble()) }, max = g.getDouble("mem_total").toFloat(), height = 40.dp) }
+        }
+    }
+}
+
+@Composable
+private fun Processes(count: Int, scope: CoroutineScope) {
+    var sort by remember { mutableStateOf("cpu") }
+    var desc by remember { mutableStateOf(true) }
+    var q by remember { mutableStateOf("") }
+    var limit by remember { mutableIntStateOf(40) }
+    var selected by remember { mutableStateOf<JSONObject?>(null) }
+    val res = loaded(listOf(sort, desc, q, limit), 2000) {
+        Hc.json("/api/procs?sort=$sort&order=${if (desc) "desc" else "asc"}&q=${Uri.encode(q)}&limit=$limit")
+    }
+    Section("Processes  ($count)") {
+        OutlinedTextField(q, { q = it; limit = 40 }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Search name, command, user or PID") })
+        // tap a column header to sort by it; tap again to reverse
+        @Composable
+        fun H(label: String, key: String, mod: Modifier) {
+            val on = sort == key
+            Text(
+                label + if (on) (if (desc) " ▼" else " ▲") else "",
+                mod.clickable { if (on) desc = !desc else { sort = key; desc = key == "cpu" || key == "mem" } }.padding(vertical = 6.dp),
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                color = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+            )
+        }
+        Row(Modifier.fillMaxWidth()) {
+            H("PID", "pid", Modifier.width(80.dp))
+            H("NAME", "name", Modifier.weight(1f))
+            H("CPU%", "cpu", Modifier.width(64.dp))
+            H("MEM", "mem", Modifier.width(78.dp))
+        }
+        val procs = res.value?.optJSONArray("procs")?.objs().orEmpty()
+        procs.forEach { p ->
+            Row(Modifier.fillMaxWidth().clickable { selected = p }.padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("${p.getInt("pid")}", Modifier.width(80.dp), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                Column(Modifier.weight(1f)) {
+                    Text(p.str("name"), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(p.str("user"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text("%.1f".format(p.getDouble("cpu")), Modifier.width(64.dp), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, color = heat(p.getDouble("cpu").toFloat().coerceAtMost(100f)))
+                Text(fmtBytes(p.getDouble("mem")), Modifier.width(78.dp), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+            }
+        }
+        val matched = res.value?.optInt("matched") ?: 0
+        if (procs.size < matched) OutlinedButton({ limit += 60 }) { Text("Show more (${procs.size} of $matched)") }
     }
     selected?.let { p ->
         val pid = p.getInt("pid")
         AlertDialog(
             onDismissRequest = { selected = null },
             title = { Text("${p.str("name")}  ($pid)") },
-            text = { Text("CPU ${"%.1f".format(p.getDouble("cpu"))}% · ${fmtBytes(p.getDouble("mem"))}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(p.str("cmd"), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                    Text("user ${p.str("user")} · ${p.optInt("threads")} threads · state ${p.str("state")}", style = MaterialTheme.typography.bodySmall)
+                    Text("CPU ${"%.1f".format(p.getDouble("cpu"))}% · memory ${fmtBytes(p.getDouble("mem"))}", style = MaterialTheme.typography.bodyMedium)
+                }
+            },
             confirmButton = {
                 Row {
                     TextButton({ scope.launch { Hc.post("/api/procs/$pid/term") }; selected = null }) { Text("Terminate") }
