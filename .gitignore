@@ -4,3 +4,4 @@ zig/zig-out/
 android/build/
 android/.gradle/
 
+dist/*.apk

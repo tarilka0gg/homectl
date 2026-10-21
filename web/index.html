@@ -19,7 +19,7 @@ input[type=range]{width:100%}button{padding:8px 14px;border-radius:8px;border:1p
 <section><h2>Services</h2><div id="svc">…</div></section>
 <section><h2>Send file</h2><input id="file" type="file"><button id="send">Send</button></section>
 <script>
-let token=localStorage.token||prompt("homectl token");localStorage.token=token;
+let token=location.hash.slice(1)||localStorage.token||prompt("homectl token");history.replaceState(null,"",location.pathname);localStorage.token=token;
 const api=(p,o={})=>fetch("/api"+p,{...o,headers:{...o.headers,Authorization:"Bearer "+token}});
 const post=(p,b)=>api(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)});
 async function refresh(){const r=await api("/stats");if(r.status==401){localStorage.removeItem("token");location.reload()}

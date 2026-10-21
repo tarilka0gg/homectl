@@ -24,7 +24,7 @@ Govee needs "LAN Control" enabled per device in the Govee app.
 
 ## Other pieces
 - `zig/` — `homectl-send IP:PORT TOKEN FILE`, static uploader (cross-compile: `zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSmall`) for the Pixel/Termux and servers.
-- `android/` — WebView shell app for the web UI. Source only, **not built yet** (no Android SDK on this machine); open in Android Studio or `gradle assembleDebug`.
+- `android/` — Android app (WebView shell for the UI + share-sheet "Send to homectl" for files). Build: `android/build.sh` (needs the SDK in `~/Android/sdk`: platform 34, build-tools 34.0.0) → `android/build/homectl.apk`. On first launch enter `http://<ip>:7878` and the token; long-press Back to change them.
 - `packaging/homectl.initd` — OpenRC script.
 
 ## Roadmap

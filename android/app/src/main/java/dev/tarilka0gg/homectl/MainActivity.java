@@ -1,13 +1,15 @@
 package dev.tarilka0gg.homectl;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.SharedPreferences;
 import android.os.Bundle;
+import android.view.KeyEvent;
 import android.webkit.WebView;
 import android.widget.EditText;
-import android.app.AlertDialog;
+import android.widget.LinearLayout;
 
-/** Thin shell: shows the daemon's web UI. Long-press back to change the server address. */
+/** Shell around the daemon's web UI. Long-press Back to change server address / token. */
 public class MainActivity extends Activity {
     private WebView web;
     private SharedPreferences prefs;
@@ -20,36 +22,49 @@ public class MainActivity extends Activity {
         web.getSettings().setJavaScriptEnabled(true);
         web.getSettings().setDomStorageEnabled(true);
         setContentView(web);
-        String url = prefs.getString("url", null);
-        if (url == null) askUrl(); else web.loadUrl(url);
+        if (prefs.getString("url", null) == null) askServer(); else load();
     }
 
-    private void askUrl() {
-        EditText in = new EditText(this);
-        in.setHint("http://100.x.y.z:7878");
-        new AlertDialog.Builder(this).setTitle("homectl server").setView(in).setCancelable(false)
+    /** The token rides in the URL fragment, which the page reads and stores (never sent to the server). */
+    private void load() {
+        web.loadUrl(prefs.getString("url", "") + "/#" + prefs.getString("token", ""));
+    }
+
+    private void askServer() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(48, 16, 48, 0);
+        EditText url = new EditText(this);
+        url.setHint("http://100.x.y.z:7878");
+        url.setText(prefs.getString("url", ""));
+        EditText token = new EditText(this);
+        token.setHint("token");
+        token.setText(prefs.getString("token", ""));
+        box.addView(url);
+        box.addView(token);
+        new AlertDialog.Builder(this).setTitle("homectl server").setView(box)
             .setPositiveButton("OK", (d, w) -> {
-                String u = in.getText().toString().trim();
-                prefs.edit().putString("url", u).apply();
-                web.loadUrl(u);
+                String u = url.getText().toString().trim();
+                prefs.edit().putString("url", u).putString("token", token.getText().toString().trim()).apply();
+                load();
             }).show();
     }
 
     @Override
-    public boolean onKeyLongPress(int code, android.view.KeyEvent e) {
-        if (code == android.view.KeyEvent.KEYCODE_BACK) { askUrl(); return true; }
-        return super.onKeyLongPress(code, e);
-    }
-
-    @Override
-    public boolean onKeyDown(int code, android.view.KeyEvent e) {
-        if (code == android.view.KeyEvent.KEYCODE_BACK) { e.startTracking(); return true; }
+    public boolean onKeyDown(int code, KeyEvent e) {
+        if (code == KeyEvent.KEYCODE_BACK) { e.startTracking(); return true; }
         return super.onKeyDown(code, e);
     }
 
     @Override
-    public boolean onKeyUp(int code, android.view.KeyEvent e) {
-        if (code == android.view.KeyEvent.KEYCODE_BACK && !e.isCanceled()) {
+    public boolean onKeyLongPress(int code, KeyEvent e) {
+        if (code == KeyEvent.KEYCODE_BACK) { askServer(); return true; }
+        return super.onKeyLongPress(code, e);
+    }
+
+    @Override
+    public boolean onKeyUp(int code, KeyEvent e) {
+        if (code == KeyEvent.KEYCODE_BACK && !e.isCanceled()) {
             if (web.canGoBack()) web.goBack(); else finish();
             return true;
         }
