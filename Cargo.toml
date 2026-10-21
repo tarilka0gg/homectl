@@ -6,8 +6,9 @@ description = "Control my machines and smart home from one daemon + Android-frie
 license = "GPL-2.0-or-later"
 
 [dependencies]
-axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "time", "fs"] }
+axum = { version = "0.8", features = ["ws"] }
+libc = "0.2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "process", "time", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

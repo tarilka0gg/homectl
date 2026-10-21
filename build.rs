@@ -1,4 +1,5 @@
 fn main() {
-    cc::Build::new().file("csrc/v4l2ctl.c").warnings(true).compile("v4l2ctl");
-    println!("cargo:rerun-if-changed=csrc/v4l2ctl.c");
+    cc::Build::new().file("csrc/v4l2ctl.c").file("csrc/pty.c").warnings(true).compile("hcshim");
+    println!("cargo:rustc-link-lib=util");
+    println!("cargo:rerun-if-changed=csrc");
 }

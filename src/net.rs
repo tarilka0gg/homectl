@@ -10,7 +10,7 @@ pub type TunnelUrl = Arc<RwLock<Option<String>>>;
 
 /// Keeps `cloudflared tunnel --url` running and records the public URL it prints.
 /// Quick tunnels get a new random URL on every start; clients learn it from /api/endpoints.
-pub fn spawn_tunnel(port: u16, url: TunnelUrl) {
+pub fn spawn_tunnel(port: u16, url: TunnelUrl) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let bin = std::env::var("HOMECTL_CLOUDFLARED").unwrap_or_else(|_| "cloudflared".into());
         loop {
@@ -36,7 +36,12 @@ pub fn spawn_tunnel(port: u16, url: TunnelUrl) {
             }
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         }
-    });
+    })
+}
+
+pub async fn tunnel_available() -> bool {
+    let bin = std::env::var("HOMECTL_CLOUDFLARED").unwrap_or_else(|_| "cloudflared".into());
+    Command::new(bin).arg("--version").output().await.is_ok_and(|o| o.status.success())
 }
 
 fn find_tunnel_url(line: &str) -> Option<String> {
@@ -93,4 +98,14 @@ pub async fn pair(port: u16, token: &str) {
     }
     println!("{link}\n");
     let _ = std::process::Command::new("qrencode").args(["-t", "ANSIUTF8", &link]).status();
+    // Phones that asked to pair by code appear here (also useful on servers without a desktop).
+    if let Ok(mut s2) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+        s2.write_all(b"GET /api/pair/pending HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.ok();
+        let mut b2 = String::new();
+        s2.read_to_string(&mut b2).await.ok();
+        let pend: Value = serde_json::from_str(b2.split("\r\n\r\n").nth(1).unwrap_or("")).unwrap_or_default();
+        for p in pend.as_array().into_iter().flatten() {
+            println!("pairing request from {}: code {} (expires in {}s)", p["device"], p["code"], p["expires_in"]);
+        }
+    }
 }

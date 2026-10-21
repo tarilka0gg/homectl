@@ -192,3 +192,120 @@ pub fn webcam_controls(n: u8) -> Option<Value> {
 pub fn webcam_set(n: u8, id: u32, value: i32) -> bool {
     unsafe { hc_v4l2_set(video_dev(n).as_ptr(), id, value) == 0 }
 }
+
+// ---- per-app audio mixer (PipeWire via pactl) ----
+fn pct(v: &Value) -> u32 {
+    v["volume"]
+        .as_object()
+        .and_then(|o| o.values().next())
+        .and_then(|c| c["value_percent"].as_str())
+        .and_then(|s| s.trim_end_matches('%').parse().ok())
+        .unwrap_or(0)
+}
+
+async fn pactl_json(what: &str) -> Vec<Value> {
+    run("pactl", &["-f", "json", "list", what])
+        .await
+        .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
+        .unwrap_or_default()
+}
+
+pub async fn mixer() -> Value {
+    let def_sink = run("pactl", &["get-default-sink"]).await.unwrap_or_default().trim().to_string();
+    let def_src = run("pactl", &["get-default-source"]).await.unwrap_or_default().trim().to_string();
+    let dev = |v: &Value, default: &str| {
+        json!({"name": v["name"], "desc": v["description"], "percent": pct(v), "muted": v["mute"], "default": v["name"] == default})
+    };
+    let sinks: Vec<Value> = pactl_json("sinks").await.iter().map(|s| dev(s, &def_sink)).collect();
+    let sources: Vec<Value> = pactl_json("sources")
+        .await
+        .iter()
+        .filter(|s| s["monitor_of_sink"].is_null() && !s["name"].as_str().unwrap_or("").ends_with(".monitor"))
+        .map(|s| dev(s, &def_src))
+        .collect();
+    let app = |v: &Value| {
+        let p = &v["properties"];
+        let name = ["application.name", "application.process.binary", "media.name"]
+            .iter()
+            .filter_map(|k| p[*k].as_str())
+            .find(|s| !s.is_empty() && *s != "(null)")
+            .unwrap_or("Unknown");
+        json!({"id": v["index"], "app": name, "title": p["media.name"], "percent": pct(v), "muted": v["mute"], "playing": !v["corked"].as_bool().unwrap_or(false)})
+    };
+    let streams: Vec<Value> = pactl_json("sink-inputs").await.iter().map(app).collect();
+    let recording: Vec<Value> = pactl_json("source-outputs").await.iter().map(app).collect();
+    json!({"sinks": sinks, "sources": sources, "streams": streams, "recording": recording})
+}
+
+pub async fn mixer_set(kind: &str, id: &str, percent: Option<u16>, muted: Option<bool>, default: bool) -> bool {
+    let (vol, mute, def) = match kind {
+        "stream" => ("set-sink-input-volume", "set-sink-input-mute", None),
+        "recording" => ("set-source-output-volume", "set-source-output-mute", None),
+        "sink" => ("set-sink-volume", "set-sink-mute", Some("set-default-sink")),
+        "source" => ("set-source-volume", "set-source-mute", Some("set-default-source")),
+        _ => return false,
+    };
+    if !valid_name(id) {
+        return false;
+    }
+    let mut good = true;
+    if let Some(p) = percent {
+        good &= ok("pactl", &[vol, id, &format!("{}%", p.min(150))]).await;
+    }
+    if let Some(m) = muted {
+        good &= ok("pactl", &[mute, id, if m { "1" } else { "0" }]).await;
+    }
+    if let (true, Some(d)) = (default, def) {
+        good &= ok("pactl", &[d, id]).await;
+    }
+    good
+}
+
+// ---- power ----
+/// Runs after a short delay so the HTTP reply gets out first. HOMECTL_DRYRUN=1 only logs.
+pub fn power(action: &str) -> bool {
+    let (login, plain): (&[&str], &str) = match action {
+        "poweroff" => (&["poweroff"], "poweroff"),
+        "reboot" => (&["reboot"], "reboot"),
+        "suspend" => (&["suspend"], "pm-suspend"),
+        "lock" => (&["lock-session"], ""),
+        _ => return false,
+    };
+    let action = action.to_string();
+    let (login, plain): (Vec<String>, String) = (login.iter().map(|s| s.to_string()).collect(), plain.to_string());
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        if std::env::var("HOMECTL_DRYRUN").is_ok_and(|v| v == "1") {
+            eprintln!("DRYRUN power {action}");
+            return;
+        }
+        let l: Vec<&str> = login.iter().map(|s| s.as_str()).collect();
+        if ok("loginctl", &l).await || plain.is_empty() {
+            return;
+        }
+        // Hosts without logind (e.g. Alpine): doas, then direct.
+        if !ok("doas", &["-n", &plain]).await {
+            ok(&plain, &[]).await;
+        }
+    });
+    true
+}
+
+// ---- process control ----
+pub fn signal(pid: i32, sig: &str) -> bool {
+    let s = match sig {
+        "term" => libc::SIGTERM,
+        "kill" => libc::SIGKILL,
+        "stop" => libc::SIGSTOP,
+        "cont" => libc::SIGCONT,
+        _ => return false,
+    };
+    pid > 1 && pid != std::process::id() as i32 && unsafe { libc::kill(pid, s) } == 0
+}
+
+// ---- airplane mode (all radios) ----
+pub async fn radios() -> Value {
+    let wifi = run("nmcli", &["radio", "wifi"]).await.is_some_and(|s| s.trim() == "enabled");
+    let bt = run("bluetoothctl", &["show"]).await.is_some_and(|s| s.contains("Powered: yes"));
+    json!({"wifi": wifi, "bluetooth": bt})
+}
