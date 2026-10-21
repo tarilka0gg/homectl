@@ -71,6 +71,7 @@ public class ShareActivity extends Activity {
             c.disconnect();
             return code == 201;
         } catch (Exception e) {
+            android.util.Log.e("homectl", "upload failed: " + u, e);
             return false;
         }
     }
