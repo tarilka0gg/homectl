@@ -8,6 +8,8 @@ license = "GPL-2.0-or-later"
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
 libc = "0.2"
+futures-util = { version = "0.3", default-features = false }
+tokio-util = { version = "0.7", features = ["io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "process", "time", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

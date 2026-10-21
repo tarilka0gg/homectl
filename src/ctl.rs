@@ -213,8 +213,13 @@ async fn pactl_json(what: &str) -> Vec<Value> {
 pub async fn mixer() -> Value {
     let def_sink = run("pactl", &["get-default-sink"]).await.unwrap_or_default().trim().to_string();
     let def_src = run("pactl", &["get-default-source"]).await.unwrap_or_default().trim().to_string();
+    // A device is usable unless its active port reports "not available" (e.g. an HDMI output with nothing plugged in).
+    let usable = |v: &Value| {
+        let active = v["active_port"].as_str().unwrap_or("");
+        v["ports"].as_array().and_then(|ps| ps.iter().find(|p| p["name"] == active)).map_or(true, |p| p["availability"] != "not available")
+    };
     let dev = |v: &Value, default: &str| {
-        json!({"name": v["name"], "desc": v["description"], "percent": pct(v), "muted": v["mute"], "default": v["name"] == default})
+        json!({"name": v["name"], "desc": v["description"], "percent": pct(v), "muted": v["mute"], "default": v["name"] == default, "available": usable(v), "state": v["state"]})
     };
     let sinks: Vec<Value> = pactl_json("sinks").await.iter().map(|s| dev(s, &def_sink)).collect();
     let sources: Vec<Value> = pactl_json("sources")

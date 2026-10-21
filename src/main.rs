@@ -1,4 +1,5 @@
 mod ctl;
+mod fs;
 mod govee;
 mod monitor;
 mod net;
@@ -7,7 +8,6 @@ mod sys;
 mod term;
 
 use axum::{
-    body::Bytes,
     extract::{ConnectInfo, Path, Query, Request, State, WebSocketUpgrade},
     http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
@@ -33,7 +33,8 @@ struct App {
     tunnel: net::TunnelUrl,
     tunnel_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     failures: AtomicU32,
-    mon: monitor::Snapshot,
+    mon: monitor::Monitor,
+    sessions: Arc<term::Sessions>,
     pairing: pair::Pairing,
 }
 
@@ -109,8 +110,46 @@ async fn stats() -> impl IntoResponse {
     Json(sys::stats())
 }
 
-async fn monitor(State(app): S) -> impl IntoResponse {
-    Json(app.mon.read().unwrap().clone())
+#[derive(Deserialize)]
+struct MonQ {
+    gpu: Option<u8>,
+}
+
+async fn monitor(State(app): S, Query(q): Query<MonQ>) -> impl IntoResponse {
+    if q.gpu == Some(1) {
+        app.mon.force_gpu();
+    }
+    Json(app.mon.snapshot.read().unwrap().clone())
+}
+
+#[derive(Deserialize)]
+struct ProcQ {
+    sort: Option<String>,
+    order: Option<String>,
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn procs(State(app): S, Query(q): Query<ProcQ>) -> impl IntoResponse {
+    let desc = q.order.as_deref() != Some("asc");
+    Json(app.mon.query_procs(q.sort.as_deref().unwrap_or("cpu"), desc, q.q.as_deref().unwrap_or(""), q.limit.unwrap_or(80).min(2000)))
+}
+
+async fn term_list(State(app): S) -> impl IntoResponse {
+    Json(app.sessions.list())
+}
+
+async fn term_kill(State(app): S, Path(id): Path<String>) -> StatusCode {
+    if app.sessions.kill(&id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
+async fn term_rename(State(app): S, Path(id): Path<String>, Json(t): Json<NameBody>) -> StatusCode {
+    if app.sessions.rename(&id, &t.name) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
+#[derive(Deserialize)]
+struct NameBody {
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -152,15 +191,12 @@ async fn light_set(Path(ip): Path<String>, Json(c): Json<LightCmd>) -> StatusCod
     }
 }
 
-async fn upload(State(app): S, Path(name): Path<String>, body: Bytes) -> StatusCode {
+async fn upload(State(app): S, Path(name): Path<String>, body: axum::body::Body) -> StatusCode {
     let safe: String = name.chars().filter(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_')).collect();
     if safe.is_empty() || safe.starts_with('.') {
         return StatusCode::BAD_REQUEST;
     }
-    match tokio::fs::write(app.inbox.join(safe), body).await {
-        Ok(()) => StatusCode::CREATED,
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
-    }
+    fs::upload(Query(fs::UploadQ::new(app.inbox.display().to_string(), safe)), body).await
 }
 
 #[derive(Deserialize)]
@@ -339,6 +375,7 @@ async fn pair_pending(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>,
 #[derive(Deserialize)]
 struct TermQ {
     t: String,
+    s: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
 }
@@ -352,7 +389,9 @@ async fn term_ws(State(app): S, Query(q): Query<TermQ>, ws: WebSocketUpgrade) ->
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let (c, r) = (q.cols.unwrap_or(80), q.rows.unwrap_or(24));
-    ws.on_upgrade(move |s| term::run(s, c, r))
+    let id = q.s.unwrap_or_else(|| "main".into());
+    let reg = app.sessions.clone();
+    ws.on_upgrade(move |sock| term::attach(reg, sock, id, c, r))
 }
 
 async fn index() -> Html<&'static str> {
@@ -379,6 +418,7 @@ async fn main() {
         tunnel_task: Mutex::new(tunnel_task),
         failures: AtomicU32::new(0),
         mon: monitor::start(),
+        sessions: Default::default(),
         pairing: Default::default(),
     });
 
@@ -407,9 +447,17 @@ async fn main() {
         .route("/clipboard", get(clip_get).post(clip_post))
         .route("/webcam/{n}", get(cam_get).post(cam_post))
         .route("/power/{action}", post(power_post))
+        .route("/procs", get(procs))
         .route("/procs/{pid}/{sig}", post(proc_signal))
+        .route("/term/sessions", get(term_list))
+        .route("/term/sessions/{id}", axum::routing::delete(term_kill))
+        .route("/term/sessions/{id}/name", post(term_rename))
+        .route("/fs/list", get(fs::list))
+        .route("/fs/download", get(fs::download))
+        .route("/fs/upload", post(fs::upload))
+        .route("/fs/mkdir", post(fs::mkdir))
         .route("/tunnel", get(tunnel_get).post(tunnel_post))
-        .layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024))
+        .layer(axum::extract::DefaultBodyLimit::disable())
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         .with_state(app.clone());
 
