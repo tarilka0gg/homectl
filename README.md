@@ -22,7 +22,12 @@ Token is generated in `~/.config/homectl/token`; the UI asks for it once. Use it
 
 Govee needs "LAN Control" enabled per device in the Govee app.
 
+## Other pieces
+- `zig/` — `homectl-send IP:PORT TOKEN FILE`, static uploader (cross-compile: `zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSmall`) for the Pixel/Termux and servers.
+- `android/` — WebView shell app for the web UI. Source only, **not built yet** (no Android SDK on this machine); open in Android Studio or `gradle assembleDebug`.
+- `packaging/homectl.initd` — OpenRC script.
+
 ## Roadmap
-Zig agent for Pixel/Termux, Android wrapper, photos, ssh key management, TLS.
+build/test the Android app, photos, ssh key management, TLS.
 
 License: GPL-2.0-or-later

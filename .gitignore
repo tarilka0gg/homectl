@@ -1,1 +1,6 @@
 target/
+zig/.zig-cache/
+zig/zig-out/
+android/build/
+android/.gradle/
+
