@@ -1,11 +1,27 @@
 #!/sbin/openrc-run
-# OpenRC unit: run as a normal user so wpctl/wl-clipboard/brightnessctl see that user's session.
+# homectl daemon as an OpenRC service, supervised (restarts itself if it ever crashes).
+# Settings live in /etc/conf.d/homectl:  HOMECTL_USER=...  HOMECTL_BIN=/path/to/homectl
+# Optional public tunnel:  export HOMECTL_TUNNEL=quick  (and make sure cloudflared is on PATH)
 description="homectl control daemon"
-# Optional public tunnel: put  export HOMECTL_TUNNEL=quick  and  export PATH=$PATH:/home/tarilka0gg/.local/bin  in /etc/conf.d/homectl
-command="/usr/local/bin/homectl"
-command_user="${HOMECTL_USER:-tarilka0gg}"
-command_background=true
-pidfile="/run/homectl.pid"
+
+: "${HOMECTL_USER:=root}"
+: "${HOMECTL_BIN:=/usr/local/bin/homectl}"
+
+supervisor=supervise-daemon
+command="$HOMECTL_BIN"
+command_user="$HOMECTL_USER"
 output_log="/var/log/homectl.log"
 error_log="/var/log/homectl.log"
-depend() { need net; }
+respawn_delay=5
+respawn_max=0
+
+depend() {
+	need net
+	use tailscale
+}
+
+start_pre() {
+	# the daemon keeps its token and settings under $HOME
+	HOME="$(getent passwd "$HOMECTL_USER" | cut -d: -f6)"
+	export HOME
+}

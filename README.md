@@ -67,7 +67,10 @@ The app remembers every address a machine reports and uses the best one that ans
   (one rule for the `-on` and one for the `-off` script). The daemon never edits `/etc/doas.conf`.
 
 ## Run at boot (OpenRC)
-`packaging/homectl.initd` is an init script: copy it to `/etc/init.d/homectl`, install the binary to `/usr/local/bin/homectl`, then `rc-update add homectl`. For the tunnel put `export HOMECTL_TUNNEL=quick` in `/etc/conf.d/homectl`.
+```sh
+doas sh packaging/install-service.sh [USER] [PATH-TO-homectl]     # as root; defaults to you and ~/homectl/homectl
+```
+Installs `/etc/init.d/homectl` (supervised: restarts itself if it crashes), adds it to the default runlevel and starts it. Settings are in `/etc/conf.d/homectl`; for the public tunnel add `export HOMECTL_TUNNEL=quick` there. Updating later needs no root: replace the binary and `kill` the running one, the supervisor starts the new one. Service control from the app goes through `doas -n`, so it needs a passwordless rule on hosts without logind (e.g. Alpine).
 
 ## API
 All routes need `Authorization: Bearer <token>` except `/api/ping` and pairing. JSON in and out.
