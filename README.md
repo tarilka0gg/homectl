@@ -88,7 +88,7 @@ cargo build --release                 # daemon (needs a C compiler for the V4L2 
 cd zig && zig build -Doptimize=ReleaseSmall   # homectl-send; add -Dtarget=aarch64-linux-musl for ARM
 cd android && gradle :app:assembleRelease     # app; needs the Android SDK (platform 34, build-tools 34)
 ```
-The app is signed with the key in `~/.config/homectl/debug.keystore` (override with `HOMECTL_KEYSTORE`; the build creates nothing — generate one with `keytool -genkeypair -alias homectl …` using password `android`).
+The app is signed with the key in `~/.config/homectl/debug.keystore` (override with `HOMECTL_KEYSTORE`). Create your own with `keytool -genkeypair -keystore ~/.config/homectl/debug.keystore -alias homectl -keyalg RSA -keysize 2048 -validity 10000` using password `android`.
 
 ## Layout
 `src/` Rust daemon · `csrc/` C V4L2 shim · `zig/` uploader · `android/` Kotlin + Compose app · `web/` built-in web page (open `http://host:7878`) · `packaging/` init script
