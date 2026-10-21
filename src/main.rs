@@ -1,3 +1,4 @@
+mod ctl;
 mod govee;
 mod sys;
 
@@ -116,6 +117,73 @@ async fn upload(State(app): S, Path(name): Path<String>, body: Bytes) -> StatusC
     }
 }
 
+fn status(ok: bool) -> StatusCode {
+    if ok { StatusCode::NO_CONTENT } else { StatusCode::INTERNAL_SERVER_ERROR }
+}
+
+async fn audio_get() -> impl IntoResponse { Json(ctl::audio().await) }
+
+#[derive(Deserialize)]
+struct AudioCmd { percent: Option<u8>, muted: Option<bool> }
+
+async fn audio_post(Path(target): Path<String>, Json(c): Json<AudioCmd>) -> StatusCode {
+    status(ctl::audio_set(&target, c.percent, c.muted).await)
+}
+
+async fn bt_get() -> impl IntoResponse { Json(ctl::bluetooth().await) }
+
+#[derive(Deserialize)]
+struct On { on: bool }
+
+async fn bt_power(Json(c): Json<On>) -> StatusCode { status(ctl::bluetooth_power(c.on).await) }
+
+async fn bt_link(Path((mac, action)): Path<(String, String)>) -> StatusCode {
+    match action.as_str() {
+        "connect" | "disconnect" => status(ctl::bluetooth_link(&mac, action == "connect").await),
+        _ => StatusCode::BAD_REQUEST,
+    }
+}
+
+async fn wifi_get() -> impl IntoResponse { Json(ctl::wifi().await) }
+async fn wifi_power(Json(c): Json<On>) -> StatusCode { status(ctl::wifi_power(c.on).await) }
+
+async fn services_get() -> impl IntoResponse { Json(ctl::services().await) }
+
+async fn service_post(Path((name, action)): Path<(String, String)>) -> StatusCode {
+    status(ctl::service_action(&name, &action).await)
+}
+
+async fn monitors_get() -> impl IntoResponse { Json(ctl::monitors().await) }
+
+async fn monitor_get(Path(d): Path<u8>) -> impl IntoResponse {
+    Json(serde_json::json!({ "percent": ctl::monitor_brightness_get(d).await }))
+}
+
+async fn monitor_post(Path(d): Path<u8>, Json(p): Json<Percent>) -> StatusCode {
+    status(ctl::monitor_brightness_set(d, p.percent).await)
+}
+
+async fn clip_get() -> impl IntoResponse { Json(serde_json::json!({ "text": ctl::clipboard_get().await })) }
+
+#[derive(Deserialize)]
+struct Text { text: String }
+
+async fn clip_post(Json(t): Json<Text>) -> StatusCode { status(ctl::clipboard_set(&t.text).await) }
+
+async fn cam_get(Path(n): Path<u8>) -> Response {
+    match ctl::webcam_controls(n) {
+        Some(v) => Json(v).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct CamSet { id: u32, value: i32 }
+
+async fn cam_post(Path(n): Path<u8>, Json(c): Json<CamSet>) -> StatusCode {
+    status(ctl::webcam_set(n, c.id, c.value))
+}
+
 async fn index() -> Html<&'static str> {
     Html(include_str!("../web/index.html"))
 }
@@ -133,6 +201,19 @@ async fn main() {
         .route("/lights", get(lights))
         .route("/lights/{ip}", post(light_set))
         .route("/files/{name}", post(upload))
+        .route("/audio", get(audio_get))
+        .route("/audio/{target}", post(audio_post))
+        .route("/bluetooth", get(bt_get))
+        .route("/bluetooth/power", post(bt_power))
+        .route("/bluetooth/{mac}/{action}", post(bt_link))
+        .route("/wifi", get(wifi_get))
+        .route("/wifi/power", post(wifi_power))
+        .route("/services", get(services_get))
+        .route("/services/{name}/{action}", post(service_post))
+        .route("/monitors", get(monitors_get))
+        .route("/monitors/{d}/brightness", get(monitor_get).post(monitor_post))
+        .route("/clipboard", get(clip_get).post(clip_post))
+        .route("/webcam/{n}", get(cam_get).post(cam_post))
         .layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         .with_state(app);

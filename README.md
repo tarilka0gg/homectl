@@ -12,10 +12,17 @@ Token is generated in `~/.config/homectl/token`; the UI asks for it once. Use it
 - `GET|POST /api/brightness` — `{"percent": N}` (brightnessctl)
 - `GET /api/lights` — Govee LAN scan; `POST /api/lights/{ip}` with `on`, `brightness`, `rgb`, `kelvin`
 - `POST /api/files/{name}` — raw body saved to `~/homectl-inbox`
+- `GET /api/audio`, `POST /api/audio/{output,mic}` — wpctl volume/mute
+- `GET /api/bluetooth`, `POST /api/bluetooth/power`, `POST /api/bluetooth/{mac}/{connect,disconnect}`
+- `GET /api/wifi`, `POST /api/wifi/power` — NetworkManager
+- `GET /api/services`, `POST /api/services/{name}/{start,stop,restart}` — OpenRC via `doas -n`
+- `GET /api/monitors`, `GET|POST /api/monitors/{n}/brightness` — DDC/CI (ddcutil)
+- `GET|POST /api/clipboard` — Wayland (wl-clipboard)
+- `GET|POST /api/webcam/{n}` — V4L2 controls via a C shim (`csrc/`)
 
 Govee needs "LAN Control" enabled per device in the Govee app.
 
 ## Roadmap
-ddcutil monitors (C shim), bluetooth/wifi/audio, services, webcam/mic (C, V4L2), clipboard, photos, Android wrapper, Zig agent for Pixel/Termux.
+Zig agent for Pixel/Termux, Android wrapper, photos, ssh key management, TLS.
 
 License: GPL-2.0-or-later

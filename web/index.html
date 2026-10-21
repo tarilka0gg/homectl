@@ -10,6 +10,13 @@ input[type=range]{width:100%}button{padding:8px 14px;border-radius:8px;border:1p
 <section><h2>System</h2><pre id="stats">…</pre></section>
 <section><h2>Screen brightness</h2><input id="bri" type="range" min="1" max="100"></section>
 <section><h2>Lights</h2><div id="lights">scanning…</div></section>
+<section><h2>Audio</h2>Out <input id="vout" type="range" min="0" max="100"><button id="mout">mute</button><br>Mic <input id="vmic" type="range" min="0" max="100"><button id="mmic">mute</button></section>
+<section><h2>Monitors</h2><div id="mons">…</div></section>
+<section><h2>Bluetooth</h2><div id="bt">…</div></section>
+<section><h2>Wi-Fi</h2><div id="wifi">…</div></section>
+<section><h2>Webcam</h2><div id="cam">…</div></section>
+<section><h2>Clipboard</h2><textarea id="clip" style="width:100%"></textarea><button id="clipset">Set</button><button id="clipget">Get</button></section>
+<section><h2>Services</h2><div id="svc">…</div></section>
 <section><h2>Send file</h2><input id="file" type="file"><button id="send">Send</button></section>
 <script>
 let token=localStorage.token||prompt("homectl token");localStorage.token=token;
@@ -27,5 +34,19 @@ api("/lights").then(r=>r.json()).then(ls=>{lights.innerHTML=ls.length?"":"none f
   br.onchange=()=>post("/lights/"+l.ip,{brightness:+br.value});
   col.onchange=()=>{const h=col.value;post("/lights/"+l.ip,{rgb:[1,3,5].map(i=>parseInt(h.substr(i,2),16))})};
   lights.append(d)}});
+
+const J=p=>api(p).then(r=>r.json());const el=(t,h)=>{const e=document.createElement(t);e.innerHTML=h;return e};
+J("/audio").then(a=>{vout.value=a.output.percent||0;vmic.value=a.mic.percent||0});
+vout.onchange=()=>post("/audio/output",{percent:+vout.value});vmic.onchange=()=>post("/audio/mic",{percent:+vmic.value});
+mout.onclick=()=>post("/audio/output",{muted:true});mmic.onclick=()=>post("/audio/mic",{muted:true});
+J("/monitors").then(async ms=>{mons.innerHTML=ms.length?"":"none (DDC)";for(const m of ms){const b=(await J(`/monitors/${m.display}/brightness`)).percent||50;
+ const d=el("div",`${m.model} <input type=range min=0 max=100 value=${b}>`);d.querySelector("input").onchange=e=>post(`/monitors/${m.display}/brightness`,{percent:+e.target.value});mons.append(d)}});
+J("/bluetooth").then(b=>{bt.innerHTML="";const pw=el("div",`power <button>${b.powered?"off":"on"}</button>`);pw.querySelector("button").onclick=()=>post("/bluetooth/power",{on:!b.powered});bt.append(pw);
+ for(const d of b.devices){const x=el("div",`${d.name} <button>${d.connected?"disconnect":"connect"}</button>`);x.querySelector("button").onclick=()=>post(`/bluetooth/${d.mac}/${d.connected?"disconnect":"connect"}`,{});bt.append(x)}});
+J("/wifi").then(w=>{wifi.innerHTML=`<button>${w.enabled?"turn off":"turn on"}</button><br>`+w.networks.filter(n=>n.active).map(n=>`${n.ssid} ${n.signal}%`).join("<br>");wifi.querySelector("button").onclick=()=>post("/wifi/power",{on:!w.enabled})});
+api("/webcam/0").then(r=>r.ok?r.json():[]).then(cs=>{cam.innerHTML=cs.length?"":"no webcam";for(const c of cs){const d=el("div",`${c.name} <input type=range min=${c.min} max=${c.max} value=${c.value}>`);d.querySelector("input").onchange=e=>post("/webcam/0",{id:c.id,value:+e.target.value});cam.append(d)}});
+clipget.onclick=async()=>clip.value=(await J("/clipboard")).text||"";clipset.onclick=()=>post("/clipboard",{text:clip.value});
+J("/services").then(ss=>{svc.innerHTML="";for(const s of ss){const d=el("div",`${s.name} <small>${s.state}</small> <button>${s.state=="started"?"stop":"start"}</button> <button>restart</button>`);
+ const [a,r]=d.querySelectorAll("button");a.onclick=()=>post(`/services/${s.name}/${a.textContent}`,{});r.onclick=()=>post(`/services/${s.name}/restart`,{});svc.append(d)}});
 send.onclick=async()=>{const f=file.files[0];if(f)await api("/files/"+encodeURIComponent(f.name),{method:"POST",body:f});alert("sent")};
 </script>
