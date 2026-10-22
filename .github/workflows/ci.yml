@@ -30,9 +30,11 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      # the runner image already contains the Android SDK (ANDROID_HOME); only the pieces this app targets are added
       - name: Install the SDK pieces the app needs
-        run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0"
       - name: Build (unsigned releases fall back to the debug key)
         working-directory: android
         run: ./gradlew --no-daemon :app:assembleRelease
