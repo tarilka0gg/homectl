@@ -8,6 +8,7 @@ mod monitor;
 mod net;
 mod pair;
 mod relay;
+mod swr;
 mod sys;
 mod term;
 
@@ -20,7 +21,7 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
     net::SocketAddr,
     path::PathBuf,
@@ -122,6 +123,8 @@ struct MonQ {
     every: Option<u64>,
     /// include the per-core CPU history (bigger reply)
     cores: Option<u8>,
+    /// the `tick` of the last reply the client has: only newer samples are sent (`hist_delta`)
+    since: Option<u64>,
 }
 
 async fn monitor(State(app): S, Query(q): Query<MonQ>) -> impl IntoResponse {
@@ -130,12 +133,47 @@ async fn monitor(State(app): S, Query(q): Query<MonQ>) -> impl IntoResponse {
         app.mon.force_gpu();
     }
     let mut v = app.mon.snapshot.read().unwrap().clone();
-    if q.cores != Some(1) {
-        if let Some(o) = v.as_object_mut() {
+    let tick = v["tick"].as_u64().unwrap_or(0);
+    let since = q.since.unwrap_or(0);
+    let delta = since > 0 && since <= tick;
+    if let Some(o) = v.as_object_mut() {
+        let ticks = o.remove("history_t");
+        if q.cores != Some(1) {
             o.remove("core_history");
+        }
+        if delta {
+            // history: only the samples taken after `since`; every client keeps the older ones from before
+            if let (Some(Value::Object(h)), Some(Value::Object(t))) = (o.get_mut("history"), ticks) {
+                for (k, vals) in h.iter_mut() {
+                    let n = t.get(k).and_then(Value::as_array).map_or(0, |ts| ts.iter().filter(|x| x.as_u64().is_some_and(|x| x > since)).count());
+                    if let Some(a) = vals.as_array_mut() {
+                        let keep = a.len().saturating_sub(n);
+                        a.drain(..keep);
+                    }
+                }
+            }
+            if let Some(Value::Array(cores)) = o.get_mut("core_history") {
+                let n = (tick - since) as usize;
+                for c in cores.iter_mut().filter_map(Value::as_array_mut) {
+                    let keep = c.len().saturating_sub(n);
+                    c.drain(..keep);
+                }
+            }
+            o.insert("hist_delta".into(), Value::Bool(true));
         }
     }
     Json(v)
+}
+
+/// A few numbers per machine for the overview cards; unlike /monitor it does not make the sampler run faster.
+async fn glance(State(app): S) -> impl IntoResponse {
+    let v = app.mon.snapshot.read().unwrap();
+    let mem = &v["mem"];
+    let used = match (mem["total"].as_f64(), mem["available"].as_f64()) {
+        (Some(t), Some(a)) if t > 0.0 => Some(100.0 * (1.0 - a / t)),
+        _ => None,
+    };
+    Json(json!({"cpu": v["cpu"]["total"], "temp": v["cpu"]["temp"], "mem": used, "name": v["info"]["hostname"]}))
 }
 
 #[derive(Deserialize)]
@@ -157,7 +195,7 @@ async fn term_list(State(app): S) -> impl IntoResponse {
 }
 
 async fn displays_get() -> impl IntoResponse {
-    Json(display::list().await)
+    Json(swr::get("displays", std::time::Duration::from_secs(20), || display::list()).await)
 }
 
 #[derive(Deserialize)]
@@ -171,6 +209,7 @@ async fn displays_set(Path((id, state)): Path<(String, String)>, Query(q): Query
         "off" => false,
         _ => return StatusCode::BAD_REQUEST.into_response(),
     };
+    swr::forget("displays");
     match display::set(&id, on, q.compositor != Some(0)).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
@@ -229,7 +268,12 @@ struct Rescan {
 }
 
 async fn lights(Query(q): Query<Rescan>) -> impl IntoResponse {
-    Json(govee::lights(q.rescan.is_some()).await)
+    if q.rescan.is_some() {
+        let v = json!(govee::lights(true).await);
+        swr::put("lights", &v);
+        return Json(v);
+    }
+    Json(swr::get("lights", std::time::Duration::from_secs(6), || async { json!(govee::lights(false).await) }).await)
 }
 
 #[derive(Deserialize)]
@@ -242,6 +286,7 @@ struct LightCmd {
 
 async fn light_set(Path(ip): Path<String>, Json(c): Json<LightCmd>) -> StatusCode {
     let Ok(ip) = ip.parse() else { return StatusCode::BAD_REQUEST };
+    swr::forget("lights");
     if govee::command(ip, c.on, c.brightness, c.rgb, c.kelvin).await.is_ok() {
         StatusCode::NO_CONTENT
     } else {
@@ -298,9 +343,10 @@ async fn bt_link(Path((mac, action)): Path<(String, String)>) -> StatusCode {
     }
 }
 async fn wifi_get() -> impl IntoResponse {
-    Json(ctl::wifi().await)
+    Json(swr::get("wifi", std::time::Duration::from_secs(8), || ctl::wifi()).await)
 }
 async fn wifi_power(Json(c): Json<On>) -> StatusCode {
+    swr::forget("wifi");
     status(ctl::wifi_power(c.on).await)
 }
 async fn services_get() -> impl IntoResponse {
@@ -310,7 +356,7 @@ async fn service_post(Path((name, action)): Path<(String, String)>) -> StatusCod
     status(ctl::service_action(&name, &action).await)
 }
 async fn monitors_get() -> impl IntoResponse {
-    Json(ctl::monitors().await)
+    Json(swr::get("monitors", std::time::Duration::from_secs(120), || ctl::monitors()).await)
 }
 async fn monitor_get(Path(d): Path<u8>) -> impl IntoResponse {
     Json(json!({ "percent": ctl::monitor_brightness_get(d).await }))
@@ -487,6 +533,7 @@ async fn main() {
         .route("/endpoints", get(endpoints))
         .route("/stats", get(stats))
         .route("/monitor", get(monitor))
+        .route("/glance", get(glance))
         .route("/brightness", get(get_brightness).post(set_brightness))
         .route("/lights", get(lights))
         .route("/lights/{ip}", post(light_set))

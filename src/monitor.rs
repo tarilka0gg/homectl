@@ -522,24 +522,35 @@ fn sample_gpu(g: &mut Gpu, ac: bool, forced: bool, pkg_temp: Option<f64>) -> Val
 // ---- sampler ----
 
 #[derive(Default)]
-struct Hist(HashMap<String, VecDeque<f64>>);
+struct Hist {
+    series: HashMap<String, VecDeque<f64>>,
+    /// the sample number (tick) each value was taken at, parallel to `series`; lets a client ask for only what is new
+    ticks: HashMap<String, VecDeque<u64>>,
+    tick: u64,
+}
 
 impl Hist {
     fn push(&mut self, k: &str, v: Option<f64>) {
         if let Some(v) = v {
-            let h = self.0.entry(k.to_string()).or_default();
+            let h = self.series.entry(k.to_string()).or_default();
+            let t = self.ticks.entry(k.to_string()).or_default();
             if h.len() == HISTORY {
                 h.pop_front();
+                t.pop_front();
             }
             h.push_back(v);
+            t.push_back(self.tick);
         }
     }
     fn to_json(&self) -> Value {
-        json!(self.0.iter().filter(|(k, _)| !k.starts_with("core.")).map(|(k, v)| (k.clone(), v.iter().collect::<Vec<_>>())).collect::<HashMap<_, _>>())
+        json!(self.series.iter().filter(|(k, _)| !k.starts_with("core.")).map(|(k, v)| (k.clone(), v.iter().collect::<Vec<_>>())).collect::<HashMap<_, _>>())
+    }
+    fn ticks_json(&self) -> Value {
+        json!(self.ticks.iter().filter(|(k, _)| !k.starts_with("core.")).map(|(k, v)| (k.clone(), v.iter().collect::<Vec<_>>())).collect::<HashMap<_, _>>())
     }
     /// One series per CPU thread, in thread order.
     fn cores_json(&self, n: usize) -> Value {
-        json!((0..n).map(|i| self.0.get(&format!("core.{i}")).map(|v| v.iter().collect::<Vec<_>>()).unwrap_or_default()).collect::<Vec<_>>())
+        json!((0..n).map(|i| self.series.get(&format!("core.{i}")).map(|v| v.iter().collect::<Vec<_>>()).unwrap_or_default()).collect::<Vec<_>>())
     }
 }
 
@@ -722,6 +733,7 @@ pub fn start() -> Monitor {
             let forced = now_s() < out.gpu_force_until.load(Ordering::Relaxed);
             let gpu_json: Vec<Value> = gpus.iter_mut().map(|g| sample_gpu(g, ac, forced, pkg_temp)).collect();
 
+            hist.tick += 1;
             hist.push("cpu", Some(total));
             for (i, c) in pct.iter().skip(1).enumerate() {
                 hist.push(&format!("core.{i}"), Some(*c));
@@ -763,7 +775,9 @@ pub fn start() -> Monitor {
                 "battery": bat,
                 "gpus": gpu_json,
                 "procs": {"count": nproc, "top": top},
+                "tick": hist.tick,
                 "history": hist.to_json(),
+                "history_t": hist.ticks_json(),
                 "core_history": hist.cores_json(pct.len().saturating_sub(1)),
                 "sample_ms": interval,
             });

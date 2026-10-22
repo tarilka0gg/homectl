@@ -40,7 +40,6 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         try {
             val c = Net.open(e.url, "GET", "/api/ping", null, 2500)
             val ok = c.responseCode == 200 && c.inputStream.bufferedReader().readText().contains("homectl")
-            c.disconnect()
             ok
         } catch (_: Exception) {
             false
@@ -82,7 +81,6 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
             }
             val code = c.responseCode
             val text = (if (code < 400) c.inputStream else c.errorStream)?.bufferedReader()?.readText() ?: ""
-            c.disconnect()
             if (code in 200..299) text else null
         } catch (_: Exception) {
             null
@@ -167,7 +165,6 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
                 c.outputStream.use { it.write(body.toString().toByteArray()) }
                 val code = c.responseCode
                 val text = (if (code < 400) c.inputStream else c.errorStream)?.bufferedReader()?.readText().orEmpty()
-                c.disconnect()
                 code to runCatching { JSONObject(text) }.getOrNull()
             } catch (_: Exception) {
                 0 to null
@@ -183,7 +180,6 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
                 c.readTimeout = readTimeoutMs
                 val code = c.responseCode
                 val text = (if (code < 400) c.inputStream else c.errorStream)?.bufferedReader()?.readText().orEmpty()
-                c.disconnect()
                 code to runCatching { JSONObject(text) }.getOrNull()
             } catch (_: Exception) {
                 0 to null
@@ -228,7 +224,6 @@ object Net {
             c.outputStream.use { it.write(body.toString().toByteArray()) }
             val ok = c.responseCode in 200..299
             val text = if (ok) c.inputStream.bufferedReader().readText() else ""
-            c.disconnect()
             if (ok) JSONObject(text) else null
         } catch (_: Exception) {
             null

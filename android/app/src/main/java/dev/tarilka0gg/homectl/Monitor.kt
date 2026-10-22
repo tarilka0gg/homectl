@@ -26,10 +26,60 @@ private val txColor = Color(0xFFFF9800)
 private val tempColor = Color(0xFFE53935)
 private val fanColors = listOf(Color(0xFF29B6F6), Color(0xFFAB47BC), Color(0xFF26A69A), Color(0xFFFFCA28))
 
+/**
+ * Keeps each machine's graph history here and asks the machine only for samples newer than the last tick, so a poll is a
+ * few KB instead of the whole history (85 KB with per-core graphs). Older daemons just send everything every time.
+ */
+private object HistStore {
+    private class Mem {
+        var tick = 0L
+        var cores = false
+        val series = HashMap<String, ArrayList<Float>>()
+        var coreSeries: ArrayList<ArrayList<Float>>? = null
+    }
+    private val mems = HashMap<String, Mem>()
+    private const val KEEP = 120
+
+    fun since(machine: String, wantCores: Boolean): Long = mems[machine]?.takeIf { it.cores == wantCores }?.tick ?: 0L
+
+    /** Folds [d] into the stored history and rewrites its `history` / `core_history` as the complete arrays. */
+    fun merge(machine: String, d: JSONObject, wantCores: Boolean) {
+        val m = mems.getOrPut(machine) { Mem() }
+        val delta = d.optBoolean("hist_delta") && m.cores == wantCores
+        val h = d.optJSONObject("history")
+        if (!delta) { m.series.clear(); m.coreSeries = null }
+        h?.keys()?.forEach { k ->
+            val list = m.series.getOrPut(k) { ArrayList() }
+            val a = h.getJSONArray(k)
+            for (i in 0 until a.length()) list.add(a.getDouble(i).toFloat())
+            while (list.size > KEEP) list.removeAt(0)
+        }
+        d.optJSONArray("core_history")?.let { cores ->
+            val store = m.coreSeries ?: ArrayList<ArrayList<Float>>().also { m.coreSeries = it }
+            for (c in 0 until cores.length()) {
+                if (store.size <= c) store.add(ArrayList())
+                val a = cores.getJSONArray(c)
+                for (i in 0 until a.length()) store[c].add(a.getDouble(i).toFloat())
+                while (store[c].size > KEEP) store[c].removeAt(0)
+            }
+        }
+        m.cores = wantCores
+        m.tick = d.optLong("tick", 0L)
+        val full = JSONObject()
+        m.series.forEach { (k, v) -> full.put(k, org.json.JSONArray(v)) }
+        d.put("history", full)
+        if (wantCores) m.coreSeries?.let { cs -> d.put("core_history", org.json.JSONArray().also { arr -> cs.forEach { arr.put(org.json.JSONArray(it)) } }) }
+        d.remove("hist_delta")
+    }
+}
+
 @Composable
 fun MonitorScreen() {
     val data = loaded(listOf(Hc.gpuLive, Hc.speedMs, Hc.perCoreGraphs), Hc.speedMs.coerceAtLeast(500).toLong()) {
-        Hc.json("/api/monitor?every=${Hc.speedMs}" + (if (Hc.gpuLive) "&gpu=1" else "") + (if (Hc.perCoreGraphs) "&cores=1" else ""))
+        val machine = Hc.cur?.id
+        val cores = Hc.perCoreGraphs
+        Hc.json("/api/monitor?every=${Hc.speedMs}" + (if (Hc.gpuLive) "&gpu=1" else "") + (if (cores) "&cores=1" else "") +
+            (machine?.let { "&since=${HistStore.since(it, cores)}" } ?: ""))?.also { d -> machine?.let { HistStore.merge(it, d, cores) } }
     }
     val scope = rememberCoroutineScope()
     if (Hc.machines.size > 1) Fleet()
@@ -324,7 +374,13 @@ private fun Fleet() {
             var temp by remember(m.id) { mutableStateOf<Double?>(null) }
             LaunchedEffect(m.id) {
                 while (true) {
-                    m.json("/api/monitor")?.let { d ->
+                    // /api/glance is ~75 bytes and doesn't speed up the machine's sampler; older daemons only have /api/monitor
+                    val g = m.json("/api/glance")
+                    if (g != null) {
+                        cpu = g.optDouble("cpu").toFloat()
+                        mem = g.optDouble("mem").toFloat()
+                        temp = if (g.isNull("temp")) null else g.getDouble("temp")
+                    } else m.json("/api/monitor")?.let { d ->
                         cpu = d.getJSONObject("cpu").getDouble("total").toFloat()
                         val mm = d.getJSONObject("mem")
                         mem = (100 * (1 - mm.getDouble("available") / mm.getDouble("total"))).toFloat()

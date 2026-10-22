@@ -1,0 +1,4 @@
+# Baseline profile: compile all of the app's own code ahead of time on install so the first launch and screen
+# switches don't start in the interpreter (the libraries ship their own profiles).
+HSPLdev/tarilka0gg/homectl/**;->**(**)**
+Ldev/tarilka0gg/homectl/**;
