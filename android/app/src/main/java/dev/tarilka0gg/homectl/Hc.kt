@@ -67,17 +67,38 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         return "http://127.0.0.1:${LocalTls.forward(host, port, pin)}$path"
     }
 
-    private suspend fun ping(e: Endpoint): Boolean = withContext(Dispatchers.IO) {
+    /** Same-network addresses answer in milliseconds, so a dead one is given up on quickly; anything reached through Tailscale's relays,
+     *  the server or a tunnel gets time for the first packets to find a path (several seconds on mobile data). */
+    private fun connectBudget(e: Endpoint) = if (e.kind == "lan") 1500 else 6000
+
+    private suspend fun ping(e: Endpoint): Boolean = probe(e).ok
+
+    class Probe(val endpoint: Endpoint, val ok: Boolean, val ms: Long, val detail: String)
+
+    /** One reachability test of [e] with the reason it failed, for the "why can't I connect?" screen. */
+    suspend fun probe(e: Endpoint): Probe = withContext(Dispatchers.IO) {
+        val t0 = System.currentTimeMillis()
         try {
-            val c = Net.open(urlOf(e), "GET", "/api/ping", null, 2500, connectMs = 1500, pin = pinFor(e))
-            c.readTimeout = 1500
-            val ok = c.responseCode == 200 && c.inputStream.bufferedReader().readText().contains("homectl")
-            ok
+            val c = Net.open(urlOf(e), "GET", "/api/ping", null, 4000, connectMs = connectBudget(e), pin = pinFor(e))
+            c.readTimeout = 4000
+            val code = c.responseCode
+            val body = if (code == 200) c.inputStream.bufferedReader().readText() else ""
+            val ok = code == 200 && body.contains("homectl")
+            Probe(e, ok, System.currentTimeMillis() - t0, if (ok) "answered" else "answered with HTTP $code, but not homectl")
         } catch (ex: Exception) {
             if (pinFor(e) != null && (ex is javax.net.ssl.SSLException || ex.cause is java.security.cert.CertificateException)) certProblem = true
-            false
+            val why = when {
+                ex is java.net.SocketTimeoutException || ex is java.net.NoRouteToHostException -> "no answer — nothing is reachable at that address from here"
+                ex is java.net.ConnectException && ex.message?.contains("refused", true) == true -> "refused — the machine is reachable but homectl isn't running on it"
+                ex is java.net.ConnectException || ex is java.net.UnknownHostException -> "can't connect — no route to that address"
+                ex is javax.net.ssl.SSLException || ex.cause is java.security.cert.CertificateException -> "the certificate is not the one pinned for this machine"
+                else -> ex.javaClass.simpleName + (ex.message?.let { ": $it" } ?: "")
+            }
+            Probe(e, false, System.currentTimeMillis() - t0, why)
         }
     }
+
+    suspend fun diagnose(): List<Probe> = coroutineScope { endpoints.map { e -> async { probe(e) } }.awaitAll() }
 
     private val probes = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 

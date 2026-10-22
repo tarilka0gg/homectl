@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -168,3 +169,43 @@ fun Chart(series: List<List<Float>>, colors: List<Color>, fmt: (Float) -> String
 }
 
 fun JSONObject.series(k: String): List<Float> = optJSONArray(k)?.floats().orEmpty()
+
+
+/** True while any VPN (Tailscale, WireGuard, …) is active on the phone. */
+fun vpnActive(ctx: android.content.Context): Boolean {
+    val cm = ctx.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+    return runCatching { cm.allNetworks.any { cm.getNetworkCapabilities(it)?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true } }.getOrDefault(false)
+}
+
+/** Tests every address of [m] and says in plain words why the machine can't be reached. */
+@Composable
+fun ConnectionTest(m: Machine, autoRun: Boolean = false) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    var results by remember(m.id) { mutableStateOf<List<Machine.Probe>?>(null) }
+    var busy by remember(m.id) { mutableStateOf(false) }
+    var vpn by remember(m.id) { mutableStateOf(vpnActive(ctx)) }
+    fun run() { busy = true; vpn = vpnActive(ctx); scope.launch { results = m.diagnose(); busy = false } }
+    LaunchedEffect(m.id) { if (autoRun) run() }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        androidx.compose.material3.OutlinedButton({ run() }, enabled = !busy) { Text(if (busy) "Testing…" else "Test the connection to ${m.name}") }
+        results?.let { rs ->
+            Text(if (vpn) "VPN on this phone: active (Tailscale or similar)" else "VPN on this phone: none active", style = MaterialTheme.typography.bodySmall)
+            rs.forEach { p ->
+                Text(
+                    (if (p.ok) "✓ " else "✗ ") + "${p.endpoint.kind}  ${p.endpoint.url.removePrefix("http://").removePrefix("https://")}  —  ${p.detail}" + if (p.ok) " (${p.ms} ms)" else "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (p.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                )
+            }
+            val tail = rs.filter { it.endpoint.kind == "tailscale" }
+            val hint = when {
+                rs.any { it.ok } -> null
+                tail.isNotEmpty() && !vpn -> "Tailscale isn't connected on this phone, so the machine's tailnet address can't work. Open the Tailscale app and connect it. Away from home it also needs to reach its login server — if it says it can't, that is why."
+                tail.isNotEmpty() && tail.all { !it.ok } -> "Tailscale is on, but the machine doesn't answer through it: the machine may be off, homectl stopped, or the tailnet can't find a path (a self-hosted Headscale that is only reachable on the home network can't hand out new routes while you're away)."
+                else -> "None of the machine's addresses answer from here."
+            }
+            hint?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+        }
+    }
+}

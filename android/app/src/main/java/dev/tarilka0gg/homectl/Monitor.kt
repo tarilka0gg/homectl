@@ -93,6 +93,7 @@ fun MonitorScreen() {
     val d = data.value
     if (d == null) {
         Text(if (Hc.cur?.offline == true) "Machine is offline." else "Loading…")
+        if (Hc.cur?.offline == true) Hc.cur?.let { ConnectionTest(it, autoRun = true) }
         return
     }
     val info = d.getJSONObject("info")

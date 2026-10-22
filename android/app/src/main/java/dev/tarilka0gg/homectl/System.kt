@@ -73,6 +73,7 @@ fun SystemScreen(onAddMachine: () -> Unit) {
     }
 
     if (m != null) SecuritySection(m)
+    if (m != null) Section("Connection") { ConnectionTest(m) }
 
     var modesNonce by remember { mutableIntStateOf(0) }
     val modes = loaded(modesNonce, 6000, "sys-modes") { Hc.array("/api/actions") }
