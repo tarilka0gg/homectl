@@ -397,7 +397,26 @@ async fn monitor_post(Path(d): Path<u8>, Json(p): Json<Percent>) -> StatusCode {
     status(ctl::monitor_brightness_set(d, p.percent).await)
 }
 async fn clip_get() -> impl IntoResponse {
-    Json(json!({ "text": ctl::clipboard_get().await }))
+    let types = ctl::clipboard_types().await;
+    let has_text = types.iter().any(|t| t.starts_with("text/") || t == "UTF8_STRING" || t == "STRING");
+    let image = types.iter().find(|t| t.starts_with("image/")).cloned();
+    if !has_text {
+        if let Some(img) = image {
+            let size = ctl::clipboard_image(&img).await.map_or(0, |b| b.len());
+            return Json(json!({"text": "", "type": img, "size": size}));
+        }
+        return Json(json!({"text": "", "type": if types.is_empty() { "empty" } else { "other" }, "types": types}));
+    }
+    Json(json!({ "text": ctl::clipboard_get().await, "type": "text" }))
+}
+
+async fn clip_image() -> Response {
+    let types = ctl::clipboard_types().await;
+    let Some(mime) = types.iter().find(|t| t.starts_with("image/")).cloned() else { return StatusCode::NOT_FOUND.into_response() };
+    match ctl::clipboard_image(&mime).await {
+        Some(b) => ([(header::CONTENT_TYPE, mime)], b).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -597,6 +616,7 @@ async fn main() {
         .route("/monitors", get(monitors_get))
         .route("/monitors/{d}/brightness", get(monitor_get).post(monitor_post))
         .route("/clipboard", get(clip_get).post(clip_post))
+        .route("/clipboard/image", get(clip_image))
         .route("/webcam/{n}", get(cam_get).post(cam_post))
         .route("/power/{action}", post(power_post))
         .route("/procs", get(procs))

@@ -168,9 +168,27 @@ fn wayland_env(c: &mut Command) -> &mut Command {
     c
 }
 
+/// What the clipboard holds: the MIME types on offer (empty = nothing).
+pub async fn clipboard_types() -> Vec<String> {
+    let Ok(o) = wayland_env(&mut Command::new("wl-paste")).arg("-l").output().await else { return vec![] };
+    if !o.status.success() {
+        return vec![];
+    }
+    String::from_utf8_lossy(&o.stdout).lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()
+}
+
 pub async fn clipboard_get() -> Option<String> {
-    let out = wayland_env(&mut Command::new("wl-paste")).arg("-n").output().await.ok()?;
+    let out = wayland_env(&mut Command::new("wl-paste")).args(["-n", "-t", "text"]).output().await.ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The image on the clipboard, if any (png/jpeg/…), at most 32 MB.
+pub async fn clipboard_image(mime: &str) -> Option<Vec<u8>> {
+    if !mime.starts_with("image/") || !mime.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '+' | '-')) {
+        return None;
+    }
+    let out = wayland_env(&mut Command::new("wl-paste")).args(["-n", "-t", mime]).output().await.ok()?;
+    (out.status.success() && out.stdout.len() <= 32 << 20).then_some(out.stdout)
 }
 
 pub async fn clipboard_set(text: &str) -> bool {

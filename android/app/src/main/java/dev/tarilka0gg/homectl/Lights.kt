@@ -57,11 +57,16 @@ fun LightsScreen() {
         }) {
             SwitchRow(if (on) "On" else "Off", on, ip) { v -> act { Hc.post("/api/lights/$ip", body("on" to v)) } }
             SliderRow("Brightness", l.optInt("brightness", 100).toFloat(), 100f, 1f, enabled = on) { b -> act { Hc.post("/api/lights/$ip", body("brightness" to b)) } }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                ColorWheel(rgb, enabled = on) { c -> act { Hc.post("/api/lights/$ip", body("on" to true, "rgb" to JSONArray(listOf(c.first, c.second, c.third)))) } }
+            }
+            Text("Pick a colour on the wheel — the centre is white, the edge the most vivid.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            SliderRow("White temperature (K)", (l.optInt("kelvin", 4000).takeIf { it in 2000..9000 } ?: 4000).toFloat(), 9000f, 2000f, enabled = on) { k -> act { Hc.post("/api/lights/$ip", body("on" to true, "kelvin" to k)) } }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 presets.forEach { (_, c) ->
                     val selected = rgb == c
                     Box(
-                        Modifier.size(40.dp).clip(CircleShape).background(Color(c.first, c.second, c.third))
+                        Modifier.size(36.dp).clip(CircleShape).background(Color(c.first, c.second, c.third))
                             .then(if (selected) Modifier.border(3.dp, MaterialTheme.colorScheme.primary, CircleShape) else Modifier)
                             .clickable { act { Hc.post("/api/lights/$ip", body("on" to true, "rgb" to JSONArray(listOf(c.first, c.second, c.third)))) } },
                     )
