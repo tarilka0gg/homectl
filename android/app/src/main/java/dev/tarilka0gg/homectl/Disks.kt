@@ -90,6 +90,18 @@ private fun PartRow(p: JSONObject, onOpen: (String) -> Unit) {
     }
 }
 
+/** Results seen in this app run, so reopening a partition or going back up a folder shows at once. */
+private object UsageCache {
+    val map = HashMap<String, Pair<Long, JSONObject>>()
+}
+
+private fun ago(s: Long) = when {
+    s < 45 -> "just now"
+    s < 3600 -> "${(s + 30) / 60} min ago"
+    s < 86400 -> "${s / 3600} h ago"
+    else -> "${s / 86400} d ago"
+}
+
 /** Biggest folders and files under [start]: tap a folder to look inside, open it in Files, or delete it. */
 @Composable
 private fun UsageDialog(start: String, onClose: () -> Unit) {
@@ -97,13 +109,36 @@ private fun UsageDialog(start: String, onClose: () -> Unit) {
     val scope = rememberCoroutineScope()
     var path by remember { mutableStateOf(start) }
     var r by remember { mutableStateOf<JSONObject?>(null) }
+    var fetchedAt by remember { mutableLongStateOf(0L) }
+    var rescan by remember { mutableIntStateOf(0) }
+    var updating by remember { mutableStateOf(false) }
     var removed by remember(path) { mutableStateOf(setOf<String>()) }
     var confirm by remember { mutableStateOf<JSONObject?>(null) }
     var deleting by remember { mutableStateOf(false) }
-    LaunchedEffect(path) {
-        r = null
-        val (code, j) = Hc.cur?.getSlow("/api/fs/usage?path=" + android.net.Uri.encode(path)) ?: (0 to null)
-        r = j?.takeIf { code == 200 } ?: JSONObject().put("failed", true)
+    LaunchedEffect(path, rescan) {
+        val key = "${Hc.cur?.id}|$path"
+        // show what we already know straight away; the machine answers from its own saved scan or measures again
+        val seen = UsageCache.map[key]
+        if (rescan == 0) { r = seen?.second; fetchedAt = seen?.first ?: 0L } else if (seen == null) r = null
+        val q = "/api/fs/usage?path=" + android.net.Uri.encode(path) + if (rescan > 0) "&fresh=1" else ""
+        suspend fun load(): JSONObject? {
+            val (code, j) = Hc.cur?.getSlow(q) ?: (0 to null)
+            return j?.takeIf { code == 200 }
+        }
+        updating = true
+        var res = load()
+        updating = false
+        if (res != null) {
+            UsageCache.map[key] = System.currentTimeMillis() to res; r = res; fetchedAt = System.currentTimeMillis()
+            if (res.optBoolean("refreshing")) {
+                // the machine is re-measuring an old result in the background: pick up the new one shortly
+                updating = true
+                kotlinx.coroutines.delay(5000)
+                res = load()
+                updating = false
+                if (res != null) { UsageCache.map[key] = System.currentTimeMillis() to res; r = res; fetchedAt = System.currentTimeMillis() }
+            }
+        } else if (r == null) r = JSONObject().put("failed", true)
     }
     val up = path.trimEnd('/').substringBeforeLast('/', "").ifEmpty { "/" }
     val canUp = path != start && path != "/"
@@ -123,6 +158,7 @@ private fun UsageDialog(start: String, onClose: () -> Unit) {
                         Text("What takes space", style = MaterialTheme.typography.titleSmall)
                         Text(path, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                    IconButton({ rescan++ }, enabled = !updating) { Icon(Icons.Default.Refresh, "Measure again") }
                     TextButton({ openInFiles(path, true) }) { Text("Open") }
                     IconButton(onClose) { Icon(Icons.Default.Close, "Close") }
                 }
@@ -141,8 +177,9 @@ private fun UsageDialog(start: String, onClose: () -> Unit) {
                         val top = entries.maxOfOrNull { it.optDouble("size") }?.coerceAtLeast(1.0) ?: 1.0
                         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             item {
+                                val age = cur.optLong("age_s") + (System.currentTimeMillis() - fetchedAt) / 1000
                                 Text(
-                                    "${fmtBytes(cur.optDouble("total"))} in ${cur.optLong("ms") / 1000.0} s" + if (cur.optBoolean("partial")) " (partial — took too long)" else "",
+                                    "${fmtBytes(cur.optDouble("total"))} · measured ${ago(age)}" + (if (updating) " · updating…" else "") + (if (cur.optBoolean("partial")) " · partial, took too long" else ""),
                                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
@@ -155,7 +192,7 @@ private fun UsageDialog(start: String, onClose: () -> Unit) {
                                         verticalArrangement = Arrangement.spacedBy(3.dp),
                                     ) {
                                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                            Text((if (dir) "📁 " else "📄 ") + e.str("name"), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) { FileBadge(e.str("name"), kindOf(e.str("name")), dir, 26.dp); Text(e.str("name"), Modifier.padding(start = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis) }
                                             Text(fmtBytes(e.optDouble("size")), style = MaterialTheme.typography.labelLarge)
                                         }
                                         Bar((e.optDouble("size") / top).toFloat(), MaterialTheme.colorScheme.primary)

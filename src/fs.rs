@@ -373,11 +373,106 @@ fn scan(root: &std::path::Path, limit: std::time::Duration) -> Option<serde_json
     Some(json!({"path": root.display().to_string(), "entries": entries, "total": total, "partial": timed_out.load(Relaxed), "ms": started.elapsed().as_millis() as u64}))
 }
 
-/// What takes the space below a folder: its biggest folders and files.
-pub async fn usage(Query(q): Query<PathQ>) -> Response {
+// ---- scan cache: results survive app restarts and are shared by every client ----
+
+type UsageCache = std::sync::Mutex<std::collections::HashMap<String, (u64, serde_json::Value)>>;
+
+fn now_s() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+fn cache_file() -> PathBuf {
+    home().join(".cache/homectl/usage.json")
+}
+
+fn usage_cache() -> &'static UsageCache {
+    static C: std::sync::OnceLock<UsageCache> = std::sync::OnceLock::new();
+    C.get_or_init(|| {
+        let loaded: std::collections::HashMap<String, (u64, serde_json::Value)> =
+            std::fs::read_to_string(cache_file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        std::sync::Mutex::new(loaded)
+    })
+}
+
+fn cache_put(key: &str, v: &serde_json::Value) {
+    let mut c = usage_cache().lock().unwrap();
+    c.insert(key.to_string(), (now_s(), v.clone()));
+    while c.len() > 150 {
+        let Some(oldest) = c.iter().min_by_key(|(_, (t, _))| *t).map(|(k, _)| k.clone()) else { break };
+        c.remove(&oldest);
+    }
+    if let Ok(t) = serde_json::to_string(&*c) {
+        let _ = std::fs::create_dir_all(cache_file().parent().unwrap());
+        let _ = std::fs::write(cache_file(), t);
+    }
+}
+
+/// Forget cached sizes of this path and of every folder above it (they just changed).
+fn cache_forget_around(p: &std::path::Path) {
+    let mut c = usage_cache().lock().unwrap();
+    let before = c.len();
+    c.retain(|k, _| !p.starts_with(k.as_str()) && !std::path::Path::new(k).starts_with(p));
+    if c.len() != before {
+        if let Ok(t) = serde_json::to_string(&*c) {
+            let _ = std::fs::write(cache_file(), t);
+        }
+    }
+}
+
+fn scanning() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+#[derive(Deserialize)]
+pub struct UsageQ {
+    path: Option<String>,
+    /// 1 = ignore the cache and measure again
+    fresh: Option<u8>,
+}
+
+/// What takes the space below a folder: its biggest folders and files. Cached: a repeat request answers at once with
+/// the saved result and its age; results older than 10 minutes are refreshed in the background.
+pub async fn usage(Query(q): Query<UsageQ>) -> Response {
     let root = resolve(q.path.as_deref());
-    match tokio::task::spawn_blocking(move || scan(&root, std::time::Duration::from_secs(60))).await {
-        Ok(Some(v)) => Json(v).into_response(),
+    let key = root.display().to_string();
+    if q.fresh != Some(1) {
+        let hit = usage_cache().lock().unwrap().get(&key).cloned();
+        if let Some((at, mut v)) = hit {
+            let age = now_s().saturating_sub(at);
+            let stale = age > 600;
+            if stale && scanning().lock().unwrap().insert(key.clone()) {
+                let (r, k) = (root.clone(), key.clone());
+                tokio::task::spawn_blocking(move || {
+                    if let Some(v) = scan(&r, std::time::Duration::from_secs(120)) {
+                        cache_put(&k, &v);
+                    }
+                    scanning().lock().unwrap().remove(&k);
+                });
+            }
+            v["cached"] = json!(true);
+            v["age_s"] = json!(age);
+            v["refreshing"] = json!(stale);
+            return Json(v).into_response();
+        }
+    }
+    scanning().lock().unwrap().insert(key.clone());
+    let k = key.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let v = scan(&root, std::time::Duration::from_secs(120));
+        if let Some(v) = &v {
+            cache_put(&k, v);
+        }
+        scanning().lock().unwrap().remove(&k);
+        v
+    })
+    .await;
+    match res {
+        Ok(Some(mut v)) => {
+            v["cached"] = json!(false);
+            v["age_s"] = json!(0);
+            Json(v).into_response()
+        }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -400,6 +495,7 @@ pub async fn delete(Json(r): Json<DelReq>) -> Response {
         return err("Refusing to delete a system or home folder.".into());
     }
     let res = tokio::task::spawn_blocking(move || -> Result<u64, String> {
+        cache_forget_around(&p);
         let m = std::fs::symlink_metadata(&p).map_err(|e| e.to_string())?;
         if m.is_dir() {
             let parent = p.parent().and_then(|x| std::fs::metadata(x).ok());

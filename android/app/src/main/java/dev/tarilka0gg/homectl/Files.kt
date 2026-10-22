@@ -53,6 +53,16 @@ private suspend fun saveToDownloads(ctx: Context, m: Machine, f: RemoteFile, onP
     return true
 }
 
+private class Snap(val value: JSONObject?)
+
+private object ListCache {
+    private val map = object : LinkedHashMap<String, JSONObject>(64, 0.75f, true) {
+        override fun removeEldestEntry(e: MutableMap.MutableEntry<String, JSONObject>) = size > 80
+    }
+    fun get(machine: String, path: String): JSONObject? = synchronized(map) { map["$machine|$path"] }
+    fun put(machine: String, path: String, v: JSONObject) = synchronized(map) { map["$machine|$path"] = v }
+}
+
 /** One row of a folder listing or of search results ([where] = the folder, shown for search hits). */
 @Composable
 private fun FileRow(m: Machine, rf: RemoteFile, dir: Boolean, link: Boolean, where: String?, onClick: () -> Unit, onLong: () -> Unit) {
@@ -62,16 +72,7 @@ private fun FileRow(m: Machine, rf: RemoteFile, dir: Boolean, link: Boolean, whe
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-            when {
-                dir -> Text("📁", style = MaterialTheme.typography.titleLarge)
-                canThumb(rf.name) -> Thumb(m, rf)
-                rf.kind == Kind.Archive -> Text("📦", style = MaterialTheme.typography.titleLarge)
-                rf.kind == Kind.Pdf -> Text("📕", style = MaterialTheme.typography.titleLarge)
-                rf.kind == Kind.Image -> Text("🖼", style = MaterialTheme.typography.titleLarge)
-                rf.kind == Kind.Video -> Text("🎬", style = MaterialTheme.typography.titleLarge)
-                rf.kind == Kind.Audio -> Text("🎵", style = MaterialTheme.typography.titleLarge)
-                else -> Text("📄", style = MaterialTheme.typography.titleLarge)
-            }
+            if (!dir && canThumb(rf.name)) Thumb(m, rf) else FileBadge(rf.name, rf.kind, dir, 44.dp)
         }
         Column(Modifier.weight(1f)) {
             Text(rf.name + if (link) "  ↪" else "", maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -108,7 +109,11 @@ fun FilesScreen() {
     var typed by remember { mutableStateOf("") }
     var searching by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
-    val listing = loaded(path to reload) { Hc.json("/api/fs/list" + (path?.let { "?path=" + android.net.Uri.encode(it) } ?: "")) }
+    // folders you have seen show instantly (and refresh behind the scenes), so back/forward never waits on the network
+    val reqKey = path ?: "~"
+    val fetched = loaded(path to reload) { Hc.json("/api/fs/list" + (path?.let { "?path=" + android.net.Uri.encode(it) } ?: ""))?.also { ListCache.put(m.id, reqKey, it) } }
+    fetched.value // subscribe: a fresh answer re-reads the cache below
+    val listing = Snap(ListCache.get(m.id, reqKey))
     val cur = listing.value?.str("path") ?: path ?: ""
     val parent = listing.value?.takeIf { !it.isNull("parent") }?.str("parent")
     val home = listing.value?.str("home").orEmpty()
@@ -445,7 +450,7 @@ private fun ArchiveDialog(m: Machine, a: RemoteFile, onClose: () -> Unit, onOpen
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Checkbox(r.path in selected, { on -> selected = if (on) selected + r.path else selected - r.path })
-                                    Text(if (r.dir) "📁" else "📄", Modifier.padding(end = 10.dp))
+                                    Box(Modifier.padding(end = 10.dp)) { FileBadge(name, kindOf(name), r.dir, 32.dp) }
                                     Column(Modifier.weight(1f)) {
                                         Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         Text(if (r.dir) "folder" else fmtBytes(r.size.toDouble()), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
