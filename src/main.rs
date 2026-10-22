@@ -2,6 +2,7 @@ mod actions;
 mod archive;
 mod clip;
 mod ctl;
+mod device;
 mod display;
 mod fs;
 mod govee;
@@ -43,6 +44,8 @@ pub(crate) struct App {
     tunnel_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub(crate) failures: AtomicU32,
     pub(crate) peers: relay::Peers,
+    pub(crate) devices: device::Devices,
+    pub(crate) device_always: std::sync::atomic::AtomicBool,
     pub(crate) tls_fp: String,
     pub(crate) tls_only: std::sync::atomic::AtomicBool,
     mon: monitor::Monitor,
@@ -82,7 +85,30 @@ pub(crate) async fn slow_down(app: &App) {
     tokio::time::sleep(std::time::Duration::from_millis(100 * n as u64)).await;
 }
 
-async fn auth(State(app): S, req: Request, next: Next) -> Response {
+/// Requests from outside (the public tunnel), or from anywhere when "always" is on, must carry an enrolled phone's signature.
+/// `path_query` is the request target as the client signed it (the signature parameters of a WebSocket URL already removed).
+pub(crate) fn device_gate(app: &App, headers: &HeaderMap, peer: Option<SocketAddr>, method: &str, path_query: &str, ws_sig: Option<device::Sig>) -> Result<(), Response> {
+    let outside = device::via_tunnel(headers);
+    let always = app.device_always.load(Ordering::Relaxed) && !peer.is_some_and(|p| p.ip().is_loopback()) && !device::via_hub(headers);
+    if !outside && !always {
+        return Ok(());
+    }
+    let deny = |why: &str| {
+        // the path only: never the query (it can hold the access token) or any signature
+        eprintln!("refused {method} {}: {why}{}", path_query.split('?').next().unwrap_or(""), if outside { " (through the tunnel)" } else { "" });
+        Err((StatusCode::UNAUTHORIZED, Json(json!({"error": "device_required", "why": why}))).into_response())
+    };
+    if app.devices.count() == 0 {
+        return deny("no phone has been registered with this machine yet — open the app once on the home network");
+    }
+    let Some(sig) = device::sig_from_headers(headers).or(ws_sig) else { return deny("this request isn't signed by a registered phone") };
+    match app.devices.verify(method, path_query, &sig) {
+        Ok(()) => Ok(()),
+        Err(why) => deny(why),
+    }
+}
+
+async fn auth(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
     let ok = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -91,6 +117,10 @@ async fn auth(State(app): S, req: Request, next: Next) -> Response {
         .is_some_and(|t| token_eq(t, &app.token));
     if ok {
         app.failures.store(0, Ordering::Relaxed);
+        let pq = req.extensions().get::<axum::extract::OriginalUri>().map_or_else(|| req.uri().to_string(), |o| o.0.path_and_query().map_or(o.0.path().to_string(), |p| p.as_str().to_string()));
+        if let Err(r) = device_gate(&app, req.headers(), Some(peer), req.method().as_str(), &pq, None) {
+            return r;
+        }
         next.run(req).await
     } else {
         slow_down(&app).await;
@@ -120,24 +150,72 @@ async fn endpoints(State(app): S) -> impl IntoResponse {
 
 /// Whether encrypted links are available, the certificate fingerprint to pin, and the encrypted-only switch.
 async fn security_get(State(app): S) -> impl IntoResponse {
-    Json(json!({"tls": !app.tls_fp.is_empty(), "fp": app.tls_fp, "tls_only": app.tls_only.load(Ordering::Relaxed)}))
+    Json(json!({"tls": !app.tls_fp.is_empty(), "fp": app.tls_fp, "tls_only": app.tls_only.load(Ordering::Relaxed), "device_always": app.device_always.load(Ordering::Relaxed), "devices": app.devices.count()}))
 }
 
 #[derive(Deserialize)]
 struct SecurityIn {
-    tls_only: bool,
+    tls_only: Option<bool>,
+    device_always: Option<bool>,
 }
 
-async fn security_set(State(app): S, Json(s): Json<SecurityIn>) -> StatusCode {
-    if s.tls_only && app.tls_fp.is_empty() {
-        return StatusCode::CONFLICT;
+fn set_marker(name: &str, on: bool) -> bool {
+    let marker = config_dir().join(name);
+    if on { std::fs::write(&marker, "").is_ok() } else { !marker.exists() || std::fs::remove_file(&marker).is_ok() }
+}
+
+async fn security_set(State(app): S, headers: HeaderMap, Json(s): Json<SecurityIn>) -> StatusCode {
+    // security settings can't be changed from outside, or through another machine
+    if !direct(&headers) {
+        return StatusCode::FORBIDDEN;
     }
-    let marker = config_dir().join("tls-only");
-    let ok = if s.tls_only { std::fs::write(&marker, "").is_ok() } else { !marker.exists() || std::fs::remove_file(&marker).is_ok() };
-    if ok {
-        app.tls_only.store(s.tls_only, Ordering::Relaxed);
+    if let Some(v) = s.tls_only {
+        if v && app.tls_fp.is_empty() {
+            return StatusCode::CONFLICT;
+        }
+        if !set_marker("tls-only", v) {
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+        app.tls_only.store(v, Ordering::Relaxed);
     }
-    status(ok)
+    if let Some(v) = s.device_always {
+        if v && app.devices.count() == 0 {
+            return StatusCode::CONFLICT; // would lock everyone out
+        }
+        if !set_marker("device-always", v) {
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+        app.device_always.store(v, Ordering::Relaxed);
+    }
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct EnrolIn {
+    name: String,
+    key: String,
+}
+
+/// Registers a phone's public key. Only from the home network: never through the tunnel or another machine.
+async fn device_enrol(State(app): S, headers: HeaderMap, Json(e): Json<EnrolIn>) -> Response {
+    if !direct(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    match app.devices.enrol(&e.name, &e.key) {
+        Ok((id, fp)) => Json(json!({"id": id, "fingerprint": fp})).into_response(),
+        Err(why) => (StatusCode::BAD_REQUEST, Json(json!({"error": why}))).into_response(),
+    }
+}
+
+async fn device_list(State(app): S) -> impl IntoResponse {
+    Json(app.devices.list_json())
+}
+
+async fn device_remove(State(app): S, headers: HeaderMap, Path(id): Path<String>) -> StatusCode {
+    if !direct(&headers) {
+        return StatusCode::FORBIDDEN;
+    }
+    if app.devices.remove(&id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
 }
 
 async fn stats() -> impl IntoResponse {
@@ -568,7 +646,7 @@ async fn tunnel_post(State(app): S, Json(c): Json<On>) -> StatusCode {
 // ---- pairing (no token yet; LAN / tailnet only) ----
 
 fn direct(h: &HeaderMap) -> bool {
-    !h.contains_key("cf-connecting-ip") && !h.contains_key("x-forwarded-for")
+    !device::via_tunnel(h) && !device::via_hub(h)
 }
 
 #[derive(Deserialize)]
@@ -623,13 +701,18 @@ struct TermQ {
     rows: Option<u16>,
 }
 
-async fn term_ws(State(app): S, Query(q): Query<TermQ>, ws: WebSocketUpgrade) -> Response {
+async fn term_ws(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>, uri: axum::http::Uri, headers: HeaderMap, Query(q): Query<TermQ>, ws: WebSocketUpgrade) -> Response {
     if std::env::var("HOMECTL_NO_TERMINAL").is_ok() {
         return StatusCode::FORBIDDEN.into_response();
     }
     if !token_eq(&q.t, &app.token) {
         slow_down(&app).await;
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let (clean, ws_sig) = device::split_query(uri.query().unwrap_or(""));
+    let pq = if clean.is_empty() { uri.path().to_string() } else { format!("{}?{clean}", uri.path()) };
+    if let Err(r) = device_gate(&app, &headers, Some(peer), "GET", &pq, ws_sig) {
+        return r;
     }
     let (c, r) = (q.cols.unwrap_or(80), q.rows.unwrap_or(24));
     let id = q.s.unwrap_or_else(|| "main".into());
@@ -663,6 +746,8 @@ async fn main() {
         tunnel_task: Mutex::new(tunnel_task),
         failures: AtomicU32::new(0),
         peers: relay::Peers::load(config_dir()),
+        devices: device::Devices::load(config_dir()),
+        device_always: std::sync::atomic::AtomicBool::new(config_dir().join("device-always").exists()),
         tls_fp: tls.as_ref().map(|t| t.fingerprint.clone()).unwrap_or_default(),
         tls_only: std::sync::atomic::AtomicBool::new(config_dir().join("tls-only").exists()),
         mon: monitor::start(),
@@ -729,6 +814,8 @@ async fn main() {
         .route("/fs/archive/extract", post(fs::archive_extract))
         .route("/fs/archive/file", get(fs::archive_file))
         .route("/security", get(security_get).post(security_set))
+        .route("/devices", get(device_list).post(device_enrol))
+        .route("/devices/{id}", axum::routing::delete(device_remove))
         .route("/priv/test", post(priv_test))
         .route("/priv/rapl", post(priv_rapl))
         .route("/tunnel", get(tunnel_get).post(tunnel_post))

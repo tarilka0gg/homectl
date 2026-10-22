@@ -79,11 +79,19 @@ pub async fn remove(State(app): State<Arc<crate::App>>, Path(id): Path<String>) 
 
 /// `/peer/{id}/{*rest}`: forwards to `{peer}/{rest}` with the peer's own token. The hub's token (Bearer, or `t=`
 /// for WebSockets) is required, except for `api/ping` so the app can tell whether the peer is reachable.
-pub async fn proxy(State(app): State<Arc<crate::App>>, Path((id, rest)): Path<(String, String)>, mut req: Request) -> Response {
+pub async fn proxy(State(app): State<Arc<crate::App>>, axum::extract::ConnectInfo(peer_addr): axum::extract::ConnectInfo<std::net::SocketAddr>, Path((id, rest)): Path<(String, String)>, mut req: Request) -> Response {
     let query = req.uri().query().unwrap_or("").to_string();
+    let (clean_query, ws_sig) = crate::device::split_query(&query);
+    let signed_pq = if clean_query.is_empty() { req.uri().path().to_string() } else { format!("{}?{clean_query}", req.uri().path()) };
+    // the phone's signature is checked here, on the machine that faces the Internet; the peer then trusts this machine
+    if rest != "api/ping" {
+        if let Err(r) = crate::device_gate(&app, req.headers(), Some(peer_addr), req.method().as_str(), &signed_pq, ws_sig) {
+            return r;
+        }
+    }
     let mut hub_t = None;
     let mut kept = vec![];
-    for kv in query.split('&').filter(|s| !s.is_empty()) {
+    for kv in clean_query.split('&').filter(|s| !s.is_empty()) {
         match kv.strip_prefix("t=") {
             Some(t) => hub_t = Some(t.to_string()),
             None => kept.push(kv.to_string()),
@@ -107,6 +115,11 @@ pub async fn proxy(State(app): State<Arc<crate::App>>, Path((id, rest)): Path<(S
     *req.uri_mut() = uri;
     *req.version_mut() = Version::HTTP_11;
     req.headers_mut().remove(header::HOST);
+    let drop: Vec<_> = req.headers().keys().filter(|k| { let k = k.as_str(); k.starts_with("cf-") || k.starts_with("x-forwarded-") || k.starts_with("x-homectl-") || k == "cdn-loop" || k == "true-client-ip" || k == "x-real-ip" || k == "forwarded" }).cloned().collect();
+    for k in drop {
+        req.headers_mut().remove(k);
+    }
+    req.headers_mut().insert("x-homectl-via", HeaderValue::from_static("hub"));
     if let Ok(v) = HeaderValue::from_str(&format!("Bearer {}", peer.token)) {
         req.headers_mut().insert(header::AUTHORIZATION, v);
     }

@@ -417,7 +417,9 @@ private fun MediaViewer(m: Machine, f: RemoteFile) {
     var progress by remember { mutableStateOf<Float?>(0f) }
     val base = m.active?.let { m.localBase(it) }
     // files on a machine stream straight from it (Range requests); entries inside an archive are fetched first
-    LaunchedEffect(f.path, f.archive) { if (f.archive != null) local = fetchToCache(ctx, m, f) { progress = it } ?: run { failed = true; null } }
+    // a signed route (the tunnel) can't be streamed by the system player — every range request would need its own signature — so it is downloaded first
+    val download = f.archive != null || m.needsSigned()
+    LaunchedEffect(f.path, f.archive) { if (download) local = fetchToCache(ctx, m, f) { progress = it } ?: run { failed = true; null } }
     if (failed) {
         Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
             Text("This phone can't play this file here.", color = Color.White)
@@ -426,7 +428,7 @@ private fun MediaViewer(m: Machine, f: RemoteFile) {
         }
         return
     }
-    if (f.archive != null && local == null || f.archive == null && base == null) return Loading(progress)
+    if (download && local == null || !download && base == null) return Loading(progress)
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         if (f.kind == Kind.Audio) Text("🎵", style = MaterialTheme.typography.displayLarge)
         AndroidView(

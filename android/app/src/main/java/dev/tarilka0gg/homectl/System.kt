@@ -309,6 +309,41 @@ private fun SecuritySection(m: Machine) {
                 scope.launch { val ok = Hc.post("/api/security", body("tls_only" to on)); if (!ok) Toast.makeText(ctx, "Couldn't change it", Toast.LENGTH_SHORT).show(); nonce++ }
             }
         }
+        // ---- this phone's identity ----
+        val devices = loaded(nonce to m.id, 0, "dev-${m.id}") { Hc.array("/api/devices") }
+        val registered = devices.value?.objs().orEmpty().any { it.str("id") == DeviceKey.id() }
+        Text("This phone", style = MaterialTheme.typography.titleSmall)
+        Text("Fingerprint (SHA-256): ${DeviceKey.fingerprintPretty().chunked(20).joinToString("\n")}", style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+        Text(
+            when {
+                devices.value == null -> "Checking whether ${m.name} knows this phone…"
+                registered -> "✓ Registered with ${m.name}. Through the public tunnel it only accepts requests signed by this phone's hardware key, so a leaked access token alone is useless."
+                else -> "✗ Not registered with ${m.name} yet. It is registered automatically the next time you are on the home network; until then the tunnel refuses this phone."
+            },
+            style = MaterialTheme.typography.bodySmall, color = if (registered) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        val always = sec.value?.optBoolean("device_always") == true
+        if (registered) SwitchRow("Require this phone on the home network too", always, "turns the signature check on for LAN and Tailscale as well; the machine itself is exempt") { on ->
+            scope.launch {
+                val ok = Hc.post("/api/security", body("device_always" to on))
+                Toast.makeText(ctx, if (ok) (if (on) "Now required everywhere" else "Only required through the tunnel") else "Couldn't change it — do it on the home network", Toast.LENGTH_LONG).show()
+                nonce++
+            }
+        }
+        val others = devices.value?.objs().orEmpty().filter { it.str("id") != DeviceKey.id() }
+        if (others.isNotEmpty()) {
+            Text("Other registered phones", style = MaterialTheme.typography.labelMedium)
+            others.forEach { d ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(d.str("name"), style = MaterialTheme.typography.bodyMedium)
+                        Text(d.str("fingerprint").take(16).uppercase().chunked(4).joinToString(" ") + "…  ·  added " + fmtDate(d.optLong("added")), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    TextButton({ scope.launch { val ok = m.call("DELETE", "/api/devices/${d.str("id")}") != null; Toast.makeText(ctx, if (ok) "Removed ${d.str("name")}" else "Couldn't remove it — do it on the home network", Toast.LENGTH_LONG).show(); nonce++ } }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+                }
+            }
+        }
+        HorizontalDivider()
         var block by remember { mutableStateOf(Hc.memBool("block.screenshots")) }
         SwitchRow("Hide the app from screenshots", block, "also blanks the app-switcher preview; applies to this phone") { on ->
             block = on; Hc.memPutBool("block.screenshots", on); (Hc.activity as? MainActivity)?.applyScreenshotBlock()

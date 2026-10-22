@@ -23,9 +23,23 @@ Disable with `HOMECTL_NO_RENDEZVOUS=1`.
 Open the app once on the home network (after updating): it learns the tunnel, the announcement channel and registers the other
 machines with the server. System → Connection → *Test the connection* shows what works.
 
+## Your phone's key (device registration)
+
+Each phone makes an EC P-256 key pair **inside its secure hardware** (StrongBox where available); the private key can't be read
+out. The first time the app reaches a machine over the home network or Tailscale it registers the *public* key there
+(`~/.config/homectl/devices.json`). From then on every request that arrives **through the tunnel** must carry a signature from a
+registered phone over `method + path + query + timestamp + one-time nonce` (valid two minutes, once). A leaked access token alone
+is refused with `device_required`; so are replays, a signature reused on another path, and old timestamps. Registering (and
+changing security settings) is refused through the tunnel or another machine, so it can only happen at home.
+
+- A machine with no registered phone refuses everything through the tunnel — open the app once at home after updating.
+- System → Security shows this phone's fingerprint and the registered phones; Remove revokes one. "Require this phone on the home
+  network too" extends the check to LAN and Tailscale.
+- Not covered: request bodies (they travel inside TLS), and an attacker who also controls the phone itself.
+
 ## Security notes
 
-- The tunnel is reachable by anyone who knows its address; the only thing protecting the daemon is the access token (24 random
-  bytes, with slow-down on wrong guesses). Turn the tunnel off with `HOMECTL_TUNNEL=off`.
+- The tunnel is reachable by anyone who knows its address; it is protected by the access token **and** a registered phone's signature
+  (see above). Turn the tunnel off with `HOMECTL_TUNNEL=off`.
 - Cloudflare terminates TLS for the tunnel and can see the traffic. The pinned-certificate HTTPS used on LAN/Tailscale does not
   apply to the tunnel. For stricter privacy, don't use the tunnel (Tailscale only).

@@ -89,7 +89,10 @@ function connect() {
   if (ws) { ws.onclose = null; try { ws.close(); } catch (e) {} }
   const cap = capacity() || {cols: term.cols, rows: term.rows};
   ended = false;
-  ws = new WebSocket(url + '&cols=' + cap.cols + '&rows=' + cap.rows);
+  // the app signs every attempt separately (a signature is good for one request); older builds fall back to the plain address
+  let u = null;
+  try { if (B && B.freshUrl) u = B.freshUrl(cap.cols, cap.rows); } catch (e) {}
+  ws = new WebSocket(u || (url + '&cols=' + cap.cols + '&rows=' + cap.rows));
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => { retry = 0; status(''); term.reset(); };
   ws.onmessage = e => {

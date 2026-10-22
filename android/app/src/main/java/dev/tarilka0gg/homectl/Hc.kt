@@ -55,6 +55,14 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         else -> fp
     }
 
+    /** Does a request to [e] need this phone's signature? True for the public tunnel and for machines set to "always". */
+    fun signFor(e: Endpoint): Boolean = e.url.contains(".trycloudflare.com") || deviceAlways
+
+    /** The machine asked for this phone's signature on every request, not only through the tunnel. */
+    var deviceAlways by mutableStateOf(false)
+
+    fun needsSigned(): Boolean = active?.let { signFor(it) } == true
+
     /** [e]'s address, as https when a certificate is pinned for it. */
     fun urlOf(e: Endpoint): String = if (pinFor(e) != null && e.url.startsWith("http://")) "https://" + e.url.removePrefix("http://") else e.url
 
@@ -87,6 +95,17 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
             val code = c.responseCode
             val body = if (code == 200) c.inputStream.bufferedReader().readText() else ""
             val ok = code == 200 && body.contains("homectl")
+            if (ok && signFor(e)) {
+                // the address answers; does the machine accept *this phone*?
+                val c2 = Net.open(urlOf(e), "GET", "/api/security", null, 4000, connectMs = 4000, pin = pinFor(e), sign = true)
+                c2.setRequestProperty("Authorization", "Bearer ${e.token ?: token}")
+                c2.readTimeout = 5000
+                if (c2.responseCode == 401) {
+                    val why = runCatching { JSONObject(c2.errorStream?.bufferedReader()?.readText().orEmpty()).optString("why") }.getOrDefault("")
+                    Hc.memPutBool("enrolled.$id", false)
+                    return@withContext Probe(e, false, System.currentTimeMillis() - t0, "reachable, but this phone isn't registered with the machine" + if (why.isNotBlank()) " ($why)" else "" + " — open the app once on the home network")
+                }
+            }
             Probe(e, ok, System.currentTimeMillis() - t0, if (ok) "answered" else "answered with HTTP $code, but not homectl")
         } catch (ex: Exception) {
             if (pinFor(e) != null && (ex is javax.net.ssl.SSLException || ex.cause is java.security.cert.CertificateException)) certProblem = true
@@ -122,7 +141,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         offline = active == null
         if (active != null) certProblem = false
         active?.let { refreshEndpoints(it) }
-        if (active != null) Hc.autoLinkAll()
+        if (active != null) { syncSecurity(); Hc.autoLinkAll() }
         return active
     }
 
@@ -145,6 +164,21 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
             if (r.second && firstOkAt == 0L) firstOkAt = System.currentTimeMillis()
         }
         active = pick?.let { cands[it] }
+    }
+
+    /**
+     * Registers this phone's public key with the machine the first time it is reached over a direct route (home network,
+     * Tailscale) — never through the tunnel or another machine, which the machine refuses — and reads its security settings.
+     */
+    private suspend fun syncSecurity() {
+        val e = active ?: return
+        val direct = e.kind == "lan" || e.kind == "tailscale"
+        if (direct && !Hc.memBool("enrolled.$id")) {
+            val body = JSONObject().put("name", android.os.Build.MODEL).put("key", DeviceKey.publicKeyB64())
+            val (code, _) = postSlowWith("/api/devices", body, 15_000, null)
+            if (code == 200) Hc.memPutBool("enrolled.$id", true)
+        }
+        json("/api/security")?.let { s -> deviceAlways = s.optBoolean("device_always", false) }
     }
 
     private var lastLookup = 0L
@@ -204,7 +238,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
 
     private suspend fun raw(e: Endpoint, method: String, path: String, body: String? = null): String? = withContext(Dispatchers.IO) {
         try {
-            val c = Net.open(urlOf(e), method, path, e.token ?: token, 4000, connectMs = 2000, pin = pinFor(e))
+            val c = Net.open(urlOf(e), method, path, e.token ?: token, 4000, connectMs = 2000, pin = pinFor(e), sign = signFor(e))
             if (body != null) {
                 c.doOutput = true
                 c.setRequestProperty("Content-Type", "application/json")
@@ -212,6 +246,8 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
             }
             val code = c.responseCode
             val text = (if (code < 400) c.inputStream else c.errorStream)?.bufferedReader()?.readText() ?: ""
+            // the machine forgot this phone (or never knew it): register again the next time it is reached directly
+            if (code == 401 && text.contains("device_required")) Hc.memPutBool("enrolled.$id", false)
             if (code in 200..299) text else null
         } catch (_: Exception) {
             null
@@ -256,7 +292,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         val e = active ?: resolve() ?: return 0 to null
         return withContext(Dispatchers.IO) {
             try {
-                val c = Net.open(urlOf(e), "POST", path, e.token ?: token, 6000, pin = pinFor(e))
+                val c = Net.open(urlOf(e), "POST", path, e.token ?: token, 6000, pin = pinFor(e), sign = signFor(e))
                 c.readTimeout = readTimeoutMs
                 if (pw != null) c.setRequestProperty("X-Homectl-Pass", android.util.Base64.encodeToString(pw.toByteArray(), android.util.Base64.NO_WRAP))
                 c.doOutput = true
@@ -276,7 +312,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         val e = active ?: resolve() ?: return false
         return withContext(Dispatchers.IO) {
             try {
-                val c = Net.open(urlOf(e), "POST", pathQuery, e.token ?: token, 6000, pin = pinFor(e))
+                val c = Net.open(urlOf(e), "POST", pathQuery, e.token ?: token, 6000, pin = pinFor(e), sign = signFor(e))
                 c.readTimeout = readTimeoutMs
                 c.doOutput = true
                 c.setFixedLengthStreamingMode(bytes.size)
@@ -296,7 +332,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         return withContext(Dispatchers.IO) {
             try {
                 val name = java.net.URLEncoder.encode(fileName, "UTF-8").replace("+", "%20")
-                val c = Net.open(urlOf(e), "POST", "/api/files/$name", e.token ?: token, 5000, pin = pinFor(e))
+                val c = Net.open(urlOf(e), "POST", "/api/files/$name", e.token ?: token, 5000, pin = pinFor(e), sign = signFor(e))
                 c.doOutput = true
                 c.setChunkedStreamingMode(65536)
                 ctx.contentResolver.openInputStream(uri)!!.use { i -> c.outputStream.use { o -> i.copyTo(o) } }
@@ -309,9 +345,14 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         }
     }
 
-    /** WebSocket URL for terminal session [sid] on the active address. */
-    fun termUrl(sid: String, shell: String? = null): String? =
-        active?.let { localBase(it).replaceFirst("http", "ws") + "/api/term?t=${it.token ?: token}&s=$sid" + (shell?.let { sh -> "&sh=" + Uri.encode(sh) } ?: "") }
+    /** WebSocket URL for terminal session [sid] on the active address, carrying this phone's signature when the machine needs it. */
+    fun termUrl(sid: String, shell: String? = null, cols: Int? = null, rows: Int? = null): String? = active?.let { e ->
+        val base = localBase(e)
+        val q = "t=${e.token ?: token}&s=$sid" + (shell?.let { sh -> "&sh=" + Uri.encode(sh) } ?: "") + (if (cols != null && rows != null) "&cols=$cols&rows=$rows" else "")
+        val url = "$base/api/term?$q"
+        val signed = if (signFor(e)) { val u = java.net.URL(url); url + "&" + DeviceKey.query("GET", u.file) } else url
+        signed.replaceFirst("http", "ws")
+    }
 
     suspend fun delete(path: String): Boolean = call("DELETE", path) != null
 
@@ -320,7 +361,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         val e = active ?: resolve() ?: return null
         return withContext(Dispatchers.IO) {
             try {
-                val c = Net.open(urlOf(e), "GET", pathQuery, e.token ?: token, 6000, pin = pinFor(e))
+                val c = Net.open(urlOf(e), "GET", pathQuery, e.token ?: token, 6000, pin = pinFor(e), sign = signFor(e))
                 c.readTimeout = 60000
                 if (range != null) c.setRequestProperty("Range", range)
                 if (c.responseCode !in 200..299) { c.disconnect(); return@withContext null }
@@ -346,7 +387,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         val e = active ?: resolve() ?: return 0 to null
         return withContext(Dispatchers.IO) {
             try {
-                val c = Net.open(urlOf(e), "POST", path, e.token ?: token, 6000, pin = pinFor(e))
+                val c = Net.open(urlOf(e), "POST", path, e.token ?: token, 6000, pin = pinFor(e), sign = signFor(e))
                 c.readTimeout = readTimeoutMs
                 c.doOutput = true
                 c.setRequestProperty("Content-Type", "application/json")
@@ -364,7 +405,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         val e = active ?: resolve() ?: return 0 to null
         return withContext(Dispatchers.IO) {
             try {
-                val c = Net.open(urlOf(e), "GET", pathQuery, e.token ?: token, 6000, pin = pinFor(e))
+                val c = Net.open(urlOf(e), "GET", pathQuery, e.token ?: token, 6000, pin = pinFor(e), sign = signFor(e))
                 c.readTimeout = readTimeoutMs
                 val code = c.responseCode
                 val text = (if (code < 400) c.inputStream else c.errorStream)?.bufferedReader()?.readText().orEmpty()
@@ -380,7 +421,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         val e = active ?: resolve() ?: return false
         return withContext(Dispatchers.IO) {
             try {
-                val c = Net.open(urlOf(e), "POST", "/api/fs/upload?dir=${Uri.encode(dir)}&name=${Uri.encode(fileName)}", e.token ?: token, 5000, pin = pinFor(e))
+                val c = Net.open(urlOf(e), "POST", "/api/fs/upload?dir=${Uri.encode(dir)}&name=${Uri.encode(fileName)}", e.token ?: token, 5000, pin = pinFor(e), sign = signFor(e))
                 c.doOutput = true
                 c.setChunkedStreamingMode(65536)
                 ctx.contentResolver.openInputStream(uri)!!.use { i -> c.outputStream.use { o -> i.copyTo(o) } }
@@ -395,8 +436,9 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
 }
 
 object Net {
-    fun open(base: String, method: String, path: String, token: String?, ms: Int, connectMs: Int = ms, pin: String? = null): HttpURLConnection =
+    fun open(base: String, method: String, path: String, token: String?, ms: Int, connectMs: Int = ms, pin: String? = null, sign: Boolean = false): HttpURLConnection =
         (URL(base + path).openConnection() as HttpURLConnection).apply {
+            if (sign) DeviceKey.headers(method, URL(base + path).file).forEach { (k, v) -> setRequestProperty(k, v) }
             if (pin != null && this is javax.net.ssl.HttpsURLConnection) {
                 sslSocketFactory = Pin.factory(pin)
                 hostnameVerifier = Pin.anyHost

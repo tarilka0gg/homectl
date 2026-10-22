@@ -166,6 +166,9 @@ object TerminalHub {
 
         @JavascriptInterface fun toggleKeyboard() { w.post { TerminalHub.toggleKeyboard(w) } }
 
+        /** A new address for every connection attempt: its signature is valid once, and the window size is part of what is signed. */
+        @JavascriptInterface fun freshUrl(cols: Int, rows: Int): String = m?.termUrl(sid, null, cols, rows).orEmpty()
+
         @JavascriptInterface fun refreshUrl() {
             val mm = m ?: return
             scope.launch { mm.active = null; mm.resolve(); start(w, mm, sid) }
