@@ -58,7 +58,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /** A file on a machine, or an entry inside an archive on a machine. */
-data class RemoteFile(val name: String, val path: String, val size: Long, val mtime: Long = 0, val archive: String? = null) {
+data class RemoteFile(val name: String, val path: String, val size: Long, val mtime: Long = 0, val archive: String? = null, val dir: Boolean = false) {
     val ext get() = name.substringAfterLast('.', "").lowercase()
     val kind get() = kindOf(name)
     val pathQuery get() = if (archive != null) "/api/fs/archive/file?path=${android.net.Uri.encode(archive)}&entry=${android.net.Uri.encode(path)}" else "/api/fs/download?path=${android.net.Uri.encode(path)}"
@@ -290,9 +290,17 @@ private fun ImageViewer(m: Machine, f: RemoteFile) {
 
 @Composable
 private fun TextViewer(m: Machine, f: RemoteFile) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     var text by remember { mutableStateOf<String?>(null) }
     var note by remember { mutableStateOf("") }
     var failed by remember { mutableStateOf(false) }
+    var editable by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf(false) }
+    var draft by remember { mutableStateOf("") }
+    var saving by remember { mutableStateOf(false) }
+    var mtime by remember(f.path) { mutableLongStateOf(f.mtime) }
+    var conflict by remember { mutableStateOf(false) }
     LaunchedEffect(f.path, f.archive) {
         val limit = 256 * 1024
         val bytes = m.stream(f.pathQuery, if (f.archive == null) "bytes=0-${limit - 1}" else null) { i, _ -> i.readNBytes(limit) }
@@ -302,22 +310,61 @@ private fun TextViewer(m: Machine, f: RemoteFile) {
             note = "Binary file — first bytes as hex"
             text = bytes.take(512).chunked(16).joinToString("\n") { row -> row.joinToString(" ") { "%02x".format(it) } + "   " + row.map { b -> if (b in 32..126) b.toInt().toChar() else '.' }.joinToString("") }
         } else {
-            if (bytes.size >= limit) note = "Showing the first ${limit / 1024} KB of ${fmtBytes(f.size.toDouble())}"
+            if (bytes.size >= limit) note = "Showing the first ${limit / 1024} KB of ${fmtBytes(f.size.toDouble())} — too large to edit here"
             text = String(bytes, Charsets.UTF_8)
+            editable = f.archive == null && bytes.size < limit
+        }
+    }
+    fun save(force: Boolean) {
+        saving = true
+        scope.launch {
+            val b = body("path" to f.path, "content" to draft).put("force", force)
+            if (mtime > 0) b.put("mtime", mtime)
+            val (code, j) = m.postSlow("/api/fs/write", b, 60_000)
+            saving = false
+            when {
+                code == 200 -> { text = draft; mtime = j?.optLong("mtime") ?: mtime; editing = false; Toast.makeText(ctx, "Saved ${f.name}", Toast.LENGTH_SHORT).show() }
+                code == 409 -> conflict = true
+                else -> Toast.makeText(ctx, j?.str("error")?.ifBlank { null } ?: "Couldn't save", Toast.LENGTH_LONG).show()
+            }
         }
     }
     when {
         failed -> Failed("Couldn't read this file.")
         text == null -> Loading(null)
         else -> Column(Modifier.fillMaxSize()) {
-            if (note.isNotEmpty()) Text(note, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
-            SelectionContainer(Modifier.weight(1f)) {
-                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
-                    Text(text!!, color = Color(0xFFE6EDF3), fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 16.sp)
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(if (editing) "Editing" else note, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f).padding(vertical = 4.dp))
+                if (editable && !editing) TextButton({ draft = text!!; editing = true }) { Text("Edit") }
+                if (editing) {
+                    TextButton({ editing = false }, enabled = !saving) { Text("Cancel") }
+                    Button({ save(false) }, enabled = !saving && draft != text) { Text(if (saving) "Saving…" else "Save") }
+                }
+            }
+            if (editing) {
+                val c = Color(0xFFE6EDF3)
+                OutlinedTextField(
+                    draft, { draft = it },
+                    Modifier.weight(1f).fillMaxWidth().padding(horizontal = 8.dp).imePadding(),
+                    textStyle = androidx.compose.ui.text.TextStyle(color = c, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 16.sp),
+                    colors = OutlinedTextFieldDefaults.colors(focusedTextColor = c, unfocusedTextColor = c, cursorColor = Color.White, focusedBorderColor = Color.White.copy(alpha = 0.5f), unfocusedBorderColor = Color.White.copy(alpha = 0.25f)),
+                )
+            } else {
+                SelectionContainer(Modifier.weight(1f)) {
+                    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
+                        Text(text!!, color = Color(0xFFE6EDF3), fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 16.sp)
+                    }
                 }
             }
         }
     }
+    if (conflict) AlertDialog(
+        onDismissRequest = { conflict = false },
+        title = { Text("File changed") },
+        text = { Text("${f.name} was changed on ${m.name} after you opened it. Overwrite it with your version?") },
+        confirmButton = { TextButton({ conflict = false; save(true) }) { Text("Overwrite", color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton({ conflict = false }) { Text("Keep editing") } },
+    )
 }
 
 @Composable

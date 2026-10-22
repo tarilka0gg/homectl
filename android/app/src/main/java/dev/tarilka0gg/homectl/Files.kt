@@ -20,6 +20,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -100,6 +102,8 @@ fun FilesScreen() {
     var mkdir by remember { mutableStateOf(false) }
     var preview by remember { mutableStateOf<Pair<List<RemoteFile>, Int>?>(null) }
     var archive by remember { mutableStateOf<RemoteFile?>(null) }
+    var renaming by remember { mutableStateOf<RemoteFile?>(null) }
+    var deleting by remember { mutableStateOf<RemoteFile?>(null) }
     var editing by remember { mutableStateOf(false) }
     var typed by remember { mutableStateOf("") }
     var searching by remember { mutableStateOf(false) }
@@ -143,7 +147,7 @@ fun FilesScreen() {
     // search: names below the current folder, a moment after typing stops
     var results by remember { mutableStateOf<List<JSONObject>?>(null) }
     var truncated by remember { mutableStateOf(false) }
-    LaunchedEffect(query, cur, showHidden, searching) {
+    LaunchedEffect(query, cur, showHidden, searching, reload) {
         results = null
         if (!searching || query.isBlank()) return@LaunchedEffect
         kotlinx.coroutines.delay(350)
@@ -253,7 +257,7 @@ fun FilesScreen() {
                     val rf = RemoteFile(e.str("name"), e.str("path"), e.optLong("size"), e.optLong("mtime"))
                     FileRow(m, rf, dir, false, e.str("path").substringBeforeLast('/').ifEmpty { "/" },
                         onClick = { if (dir) { go(rf.path); searching = false; query = "" } else open(rf, rs.filter { !it.optBoolean("dir") }.map { RemoteFile(it.str("name"), it.str("path"), it.optLong("size"), it.optLong("mtime")) }) },
-                        onLong = { if (!dir) sheet = rf })
+                        onLong = { sheet = rf.copy(dir = dir) })
                 }
                 if (truncated) item { Text("Showing the first matches — type more to narrow down.", style = MaterialTheme.typography.bodySmall) }
             }
@@ -263,7 +267,7 @@ fun FilesScreen() {
                 val dir = e.optBoolean("dir")
                 val name = e.str("name")
                 val rf = RemoteFile(name, full(name), e.optLong("size"), e.optLong("mtime"))
-                FileRow(m, rf, dir, e.optBoolean("link"), null, onClick = { if (dir) go(full(name)) else open(rf) }, onLong = { if (!dir) sheet = rf })
+                FileRow(m, rf, dir, e.optBoolean("link"), null, onClick = { if (dir) go(full(name)) else open(rf) }, onLong = { sheet = rf.copy(dir = dir) })
             }
         }
     }
@@ -272,53 +276,95 @@ fun FilesScreen() {
     archive?.let { a -> ArchiveDialog(m, a, onClose = { archive = null }, onOpenFolder = { dest -> archive = null; go(dest) }) }
 
     sheet?.let { f ->
-        ModalBottomSheet({ sheet = null }) {
-            Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        ModalBottomSheet({ sheet = null }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+            Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(f.name, style = MaterialTheme.typography.titleMedium)
-                Text("${fmtBytes(f.size.toDouble())} · ${f.path}", style = MaterialTheme.typography.bodySmall)
-                ListItem({ Text(if (f.kind == Kind.Archive) "Look inside / unzip" else "Preview") }, Modifier.combinedClickable(onClick = { sheet = null; open(f) }))
-                if (f.kind == Kind.Archive) ListItem({ Text("Unzip here") }, Modifier.combinedClickable(onClick = {
-                    sheet = null
-                    scope.launch {
-                        Toast.makeText(ctx, "Unpacking…", Toast.LENGTH_SHORT).show()
-                        val (code, j) = m.postSlow("/api/fs/archive/extract", body("path" to f.path))
-                        if (code == 200) { Toast.makeText(ctx, "Unpacked ${j?.optInt("files")} files into ${j?.str("dest")}", Toast.LENGTH_LONG).show(); reload++ }
-                        else Toast.makeText(ctx, j?.str("error")?.ifBlank { null } ?: "Unpack failed", Toast.LENGTH_LONG).show()
-                    }
-                }))
-                ListItem({ Text("Download to phone") }, Modifier.combinedClickable(onClick = {
-                    sheet = null
-                    scope.launch {
-                        progress = f.name to 0f
-                        val ok = saveToDownloads(ctx, m, f) { progress = f.name to it }
-                        progress = null
-                        Toast.makeText(ctx, if (ok) "Saved to Downloads/homectl/${f.name}" else "Download failed", Toast.LENGTH_LONG).show()
-                    }
-                }), supportingContent = { Text("Downloads/homectl") })
-                ListItem({ Text("Open with…") }, Modifier.combinedClickable(onClick = {
-                    sheet = null
-                    scope.launch {
-                        progress = f.name to 0f
-                        val file = fetchToCache(ctx, m, f) { progress = f.name to it }
-                        progress = null
-                        if (file == null) Toast.makeText(ctx, "Download failed", Toast.LENGTH_LONG).show() else openFile(ctx, file, f.name)
-                    }
-                }))
-                ListItem({ Text("Share…") }, Modifier.combinedClickable(onClick = {
-                    sheet = null
-                    scope.launch {
-                        progress = f.name to 0f
-                        val file = fetchToCache(ctx, m, f) { progress = f.name to it }
-                        progress = null
-                        if (file == null) Toast.makeText(ctx, "Download failed", Toast.LENGTH_LONG).show() else shareFile(ctx, file, f.name)
-                    }
-                }))
+                Text((if (f.dir) "" else "${fmtBytes(f.size.toDouble())} · ") + f.path, style = MaterialTheme.typography.bodySmall)
+                if (f.dir) ListItem({ Text("Open folder") }, Modifier.combinedClickable(onClick = { sheet = null; searching = false; query = ""; go(f.path) }))
+                else {
+                    ListItem({ Text(if (f.kind == Kind.Archive) "Look inside / unzip" else "Preview") }, Modifier.combinedClickable(onClick = { sheet = null; open(f) }))
+                    if (f.kind == Kind.Archive) ListItem({ Text("Unzip here") }, Modifier.combinedClickable(onClick = {
+                        sheet = null
+                        scope.launch {
+                            Toast.makeText(ctx, "Unpacking…", Toast.LENGTH_SHORT).show()
+                            val (code, j) = m.postSlow("/api/fs/archive/extract", body("path" to f.path))
+                            if (code == 200) { Toast.makeText(ctx, "Unpacked ${j?.optInt("files")} files into ${j?.str("dest")}", Toast.LENGTH_LONG).show(); reload++ }
+                            else Toast.makeText(ctx, j?.str("error")?.ifBlank { null } ?: "Unpack failed", Toast.LENGTH_LONG).show()
+                        }
+                    }))
+                    ListItem({ Text("Download to phone") }, Modifier.combinedClickable(onClick = {
+                        sheet = null
+                        scope.launch {
+                            progress = f.name to 0f
+                            val ok = saveToDownloads(ctx, m, f) { progress = f.name to it }
+                            progress = null
+                            Toast.makeText(ctx, if (ok) "Saved to Downloads/homectl/${f.name}" else "Download failed", Toast.LENGTH_LONG).show()
+                        }
+                    }), supportingContent = { Text("Downloads/homectl") })
+                    ListItem({ Text("Open with…") }, Modifier.combinedClickable(onClick = {
+                        sheet = null
+                        scope.launch {
+                            progress = f.name to 0f
+                            val file = fetchToCache(ctx, m, f) { progress = f.name to it }
+                            progress = null
+                            if (file == null) Toast.makeText(ctx, "Download failed", Toast.LENGTH_LONG).show() else openFile(ctx, file, f.name)
+                        }
+                    }))
+                    ListItem({ Text("Share…") }, Modifier.combinedClickable(onClick = {
+                        sheet = null
+                        scope.launch {
+                            progress = f.name to 0f
+                            val file = fetchToCache(ctx, m, f) { progress = f.name to it }
+                            progress = null
+                            if (file == null) Toast.makeText(ctx, "Download failed", Toast.LENGTH_LONG).show() else shareFile(ctx, file, f.name)
+                        }
+                    }))
+                }
+                ListItem({ Text("Rename") }, Modifier.combinedClickable(onClick = { sheet = null; renaming = f }))
                 ListItem({ Text("Copy path") }, Modifier.combinedClickable(onClick = {
                     sheet = null
                     (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(android.content.ClipData.newPlainText("path", f.path))
                 }))
+                ListItem({ Text(if (f.dir) "Delete folder…" else "Delete…", color = MaterialTheme.colorScheme.error) }, Modifier.combinedClickable(onClick = { sheet = null; deleting = f }))
             }
         }
+    }
+    renaming?.let { f ->
+        var name by remember(f.path) { mutableStateOf(f.name) }
+        AlertDialog(
+            onDismissRequest = { renaming = null },
+            title = { Text("Rename") },
+            text = { OutlinedTextField(name, { name = it }, singleLine = true, label = { Text("New name") }) },
+            confirmButton = {
+                TextButton({
+                    renaming = null
+                    scope.launch {
+                        val (code, j) = m.postSlow("/api/fs/rename", body("path" to f.path, "name" to name.trim()), 60_000)
+                        if (code == 200) { Toast.makeText(ctx, "Renamed to ${name.trim()}", Toast.LENGTH_SHORT).show(); reload++ }
+                        else Toast.makeText(ctx, j?.str("error")?.ifBlank { null } ?: "Couldn't rename", Toast.LENGTH_LONG).show()
+                    }
+                }, enabled = name.isNotBlank() && name.trim() != f.name) { Text("Rename") }
+            },
+            dismissButton = { TextButton({ renaming = null }) { Text("Cancel") } },
+        )
+    }
+    deleting?.let { f ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text("Delete ${f.name}?") },
+            text = { Text(f.path + "\n\n" + (if (f.dir) "The folder and everything in it" else fmtBytes(f.size.toDouble())) + " will be removed from ${m.name}. This can't be undone.") },
+            confirmButton = {
+                TextButton({
+                    deleting = null
+                    scope.launch {
+                        val (code, j) = m.postSlow("/api/fs/delete", body("path" to f.path), 600_000)
+                        if (code == 204) { Toast.makeText(ctx, "Deleted ${f.name}", Toast.LENGTH_SHORT).show(); reload++ }
+                        else Toast.makeText(ctx, j?.str("error")?.ifBlank { null } ?: "Couldn't delete (no permission?)", Toast.LENGTH_LONG).show()
+                    }
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton({ deleting = null }) { Text("Cancel") } },
+        )
     }
     if (mkdir) {
         var name by remember { mutableStateOf("") }

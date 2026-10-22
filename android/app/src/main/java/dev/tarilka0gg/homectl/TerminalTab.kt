@@ -17,6 +17,7 @@ import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -251,7 +252,42 @@ fun TerminalScreen() {
     var sshDialog by remember { mutableStateOf(false) }
     var renameDialog by remember { mutableStateOf(false) }
     var closeDialog by remember { mutableStateOf(false) }
+    var newSession by remember { mutableStateOf(false) }
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    if (newSession) {
+        // nothing is preselected and nothing is created until "Create" is pressed on a deliberate choice
+        val shells = TerminalHub.shells[m.id].orEmpty()
+        val options = listOf<Pair<String?, String>>(null to "Default shell") + shells.map { (path, name) -> path to name }
+        var choice by remember { mutableStateOf<Int?>(null) }
+        val shownAt = remember { System.currentTimeMillis() }
+        AlertDialog(
+            onDismissRequest = { newSession = false },
+            title = { Text("New terminal session") },
+            text = {
+                Column {
+                    Text("Pick a shell for ${m.name}:", style = MaterialTheme.typography.bodyMedium)
+                    options.forEachIndexed { i, (_, name) ->
+                        Row(Modifier.fillMaxWidth().clickable { if (System.currentTimeMillis() - shownAt > 400) choice = i }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(choice == i, { if (System.currentTimeMillis() - shownAt > 400) choice = i })
+                            Text(name, Modifier.padding(start = 8.dp))
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton({
+                    val c = choice ?: return@TextButton
+                    newSession = false
+                    val id = "t" + System.currentTimeMillis().toString(36)
+                    options[c].first?.let { TermState.pendingShell[TerminalHub.key(m, id)] = it }
+                    TermState.select(m, id)
+                    scope.launch { delay(1500); nonce++ }
+                }, enabled = choice != null) { Text("Create") }
+            },
+            dismissButton = { TextButton({ newSession = false }) { Text("Cancel") } },
+        )
+    }
 
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -261,23 +297,7 @@ fun TerminalScreen() {
                     FilterChip(sid == s.id, { TermState.select(m, s.id) }, label = { Text(label(shown, s)) })
                 }
                 item {
-                    var newMenu by remember { mutableStateOf(false) }
-                    val shells = TerminalHub.shells[m.id].orEmpty()
-                    Box {
-                        AssistChip({ newMenu = true }, label = { Text("＋") })
-                        DropdownMenu(newMenu, { newMenu = false }) {
-                            fun create(path: String?) {
-                                val id = "t" + System.currentTimeMillis().toString(36)
-                                path?.let { TermState.pendingShell[TerminalHub.key(m, id)] = it }
-                                TermState.select(m, id)
-                                scope.launch { delay(1500); nonce++ }
-                            }
-                            DropdownMenuItem(text = { Text("New session — default shell") }, onClick = { newMenu = false; create(null) })
-                            shells.forEach { (path, name) ->
-                                DropdownMenuItem(text = { Text("New $name session") }, onClick = { newMenu = false; create(path) })
-                            }
-                        }
-                    }
+                    AssistChip({ newSession = true }, label = { Text("＋") })
                 }
             }
             IconButton({ TermState.updateSplit(!TermState.split); if (TermState.split && TermState.second == null) TermState.updateSecond(Pane(m.id, "split")) }) {

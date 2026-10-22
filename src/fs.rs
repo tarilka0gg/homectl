@@ -419,3 +419,78 @@ pub async fn delete(Json(r): Json<DelReq>) -> Response {
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
+
+#[derive(Deserialize)]
+pub struct RenameReq {
+    path: String,
+    name: String,
+}
+
+/// Renames within the same folder; never overwrites.
+pub async fn rename(Json(r): Json<RenameReq>) -> Response {
+    let name = r.name.trim();
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\0') {
+        return err("That isn't a valid name.".into());
+    }
+    let from = resolve(Some(&r.path));
+    let Some(parent) = from.parent() else { return err("Can't rename this.".into()) };
+    if from.components().count() < 3 || from == home() {
+        return err("Refusing to rename a system or home folder.".into());
+    }
+    let to = parent.join(name);
+    if tokio::fs::symlink_metadata(&to).await.is_ok() {
+        return err("Something with that name already exists.".into());
+    }
+    match tokio::fs::rename(&from, &to).await {
+        Ok(()) => Json(json!({"path": to.display().to_string()})).into_response(),
+        Err(e) => err(e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WriteReq {
+    path: String,
+    content: String,
+    /// mtime of the version that was opened; refuse if the file changed since (unless `force`)
+    mtime: Option<i64>,
+    force: Option<bool>,
+}
+
+/// Saves edited text over an existing regular file (small files only), atomically and keeping permissions.
+pub async fn write(Json(r): Json<WriteReq>) -> Response {
+    if std::env::var("HOMECTL_NO_EDIT").is_ok() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if r.content.len() > 2 << 20 {
+        return err("Too large to edit here (limit 2 MB).".into());
+    }
+    let Ok(p) = tokio::fs::canonicalize(resolve(Some(&r.path))).await else { return StatusCode::NOT_FOUND.into_response() };
+    let res = tokio::task::spawn_blocking(move || -> Result<i64, (StatusCode, String)> {
+        let m = std::fs::metadata(&p).map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+        if !m.is_file() {
+            return Err((StatusCode::UNPROCESSABLE_ENTITY, "Not a regular file.".into()));
+        }
+        if let (Some(t), false) = (r.mtime.filter(|t| *t > 0), r.force == Some(true)) {
+            if t != m.mtime() {
+                return Err((StatusCode::CONFLICT, "This file changed on the machine since you opened it.".into()));
+            }
+        }
+        let tmp = p.with_file_name(format!(".{}.homectl-tmp", p.file_name().map_or("file".into(), |n| n.to_string_lossy().into_owned())));
+        let done = (|| -> std::io::Result<()> {
+            std::fs::write(&tmp, r.content.as_bytes())?;
+            std::fs::set_permissions(&tmp, m.permissions())?;
+            std::fs::rename(&tmp, &p)
+        })();
+        if let Err(e) = done {
+            let _ = std::fs::remove_file(&tmp);
+            return Err((StatusCode::UNPROCESSABLE_ENTITY, e.to_string()));
+        }
+        Ok(std::fs::metadata(&p).map(|m| m.mtime()).unwrap_or(0))
+    })
+    .await;
+    match res {
+        Ok(Ok(mtime)) => Json(json!({"mtime": mtime})).into_response(),
+        Ok(Err((code, e))) => (code, Json(json!({ "error": e }))).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
