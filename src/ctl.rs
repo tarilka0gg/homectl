@@ -107,8 +107,32 @@ pub async fn services() -> Value {
     json!(list)
 }
 
-pub async fn service_action(name: &str, action: &str) -> bool {
-    matches!(action, "start" | "stop" | "restart") && valid_name(name) && ok("doas", &["-n", "rc-service", name, action]).await
+pub enum Priv {
+    Done,
+    NeedsPassword,
+    WrongPassword,
+    Failed,
+}
+
+pub async fn service_action(name: &str, action: &str, password: Option<String>) -> Priv {
+    if !(matches!(action, "start" | "stop" | "restart") && valid_name(name)) {
+        return Priv::Failed;
+    }
+    match password {
+        None => match Command::new("doas").args(["-n", "rc-service", name, action]).output().await {
+            Ok(o) if o.status.success() => Priv::Done,
+            Ok(o) if String::from_utf8_lossy(&o.stderr).contains("Authorization required") => Priv::NeedsPassword,
+            _ => Priv::Failed,
+        },
+        Some(pw) => {
+            let args = vec!["rc-service".to_string(), name.to_string(), action.to_string()];
+            match tokio::task::spawn_blocking(move || crate::privileged::doas(args, &pw, std::time::Duration::from_secs(60))).await {
+                Ok(Ok(o)) if o.code == 0 => Priv::Done,
+                Ok(Ok(o)) if o.wrong_password() => Priv::WrongPassword,
+                _ => Priv::Failed,
+            }
+        }
+    }
 }
 
 // ---- external monitors (DDC/CI) ----
@@ -268,7 +292,7 @@ pub async fn mixer_set(kind: &str, id: &str, percent: Option<u16>, muted: Option
 
 // ---- power ----
 /// Runs after a short delay so the HTTP reply gets out first. HOMECTL_DRYRUN=1 only logs.
-pub fn power(action: &str) -> bool {
+pub fn power(action: &str, password: Option<String>) -> bool {
     let (login, plain): (&[&str], &str) = match action {
         "poweroff" => (&["poweroff"], "poweroff"),
         "reboot" => (&["reboot"], "reboot"),
@@ -288,7 +312,14 @@ pub fn power(action: &str) -> bool {
         if ok("loginctl", &l).await || plain.is_empty() {
             return;
         }
-        // Hosts without logind (e.g. Alpine): doas, then direct.
+        // Hosts without logind (e.g. Alpine): doas (with the user's password if the app sent it), then direct.
+        if let Some(pw) = password {
+            let p = plain.clone();
+            let done = tokio::task::spawn_blocking(move || crate::privileged::doas(vec![p], &pw, std::time::Duration::from_secs(30))).await;
+            if matches!(done, Ok(Ok(ref o)) if o.code == 0) {
+                return;
+            }
+        }
         if !ok("doas", &["-n", &plain]).await {
             ok(&plain, &[]).await;
         }

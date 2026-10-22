@@ -33,7 +33,11 @@ data class Endpoint(val kind: String, val url: String, val token: String? = null
  * them: probes all in parallel and uses the best one that answers. The daemon reports its current addresses on
  * every connection, so a changed tunnel URL is learned automatically.
  */
-class Machine(val id: String, name: String, val token: String, endpoints: List<Endpoint>) {
+class Machine(val id: String, name: String, val token: String, endpoints: List<Endpoint>, fp: String? = null) {
+    /** SHA-256 of this machine's certificate, pinned at pairing: connections to it are encrypted and checked against it. */
+    var fp by mutableStateOf(fp)
+    /** True when the machine presented a different certificate than the pinned one. */
+    var certProblem by mutableStateOf(false)
     var name by mutableStateOf(name)
     var endpoints by mutableStateOf(endpoints)
     var active by mutableStateOf<Endpoint?>(null)
@@ -41,13 +45,36 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
 
     private val order = listOf("tailscale", "lan", "server", "tunnel")
 
+    /** The certificate to pin for [e]: the relay's own for a route through another machine, none for a public https tunnel. */
+    fun pinFor(e: Endpoint): String? = when {
+        e.url.startsWith("https://") -> null
+        e.hub != null -> Hc.machines.find { it.id == e.hub }?.fp
+        else -> fp
+    }
+
+    /** [e]'s address, as https when a certificate is pinned for it. */
+    fun urlOf(e: Endpoint): String = if (pinFor(e) != null && e.url.startsWith("http://")) "https://" + e.url.removePrefix("http://") else e.url
+
+    /** Address for WebViews and the video player: an encrypted link is reached through the phone's own loopback forwarder. */
+    fun localBase(e: Endpoint): String {
+        val pin = pinFor(e)
+        if (pin == null || !e.url.startsWith("http://")) return e.url
+        val rest = e.url.removePrefix("http://")
+        val hostPort = rest.substringBefore('/')
+        val path = rest.removePrefix(hostPort)
+        val host = hostPort.substringBeforeLast(':')
+        val port = hostPort.substringAfterLast(':').toIntOrNull() ?: 7878
+        return "http://127.0.0.1:${LocalTls.forward(host, port, pin)}$path"
+    }
+
     private suspend fun ping(e: Endpoint): Boolean = withContext(Dispatchers.IO) {
         try {
-            val c = Net.open(e.url, "GET", "/api/ping", null, 2500, connectMs = 1500)
+            val c = Net.open(urlOf(e), "GET", "/api/ping", null, 2500, connectMs = 1500, pin = pinFor(e))
             c.readTimeout = 1500
             val ok = c.responseCode == 200 && c.inputStream.bufferedReader().readText().contains("homectl")
             ok
-        } catch (_: Exception) {
+        } catch (ex: Exception) {
+            if (pinFor(e) != null && (ex is javax.net.ssl.SSLException || ex.cause is java.security.cert.CertificateException)) certProblem = true
             false
         }
     }
@@ -82,12 +109,14 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         }
         active = pick?.let { cands[it] }
         offline = active == null
+        if (active != null) certProblem = false
         active?.let { refreshEndpoints(it) }
         return active
     }
 
     private suspend fun refreshEndpoints(via: Endpoint) {
         val j = raw(via, "GET", "/api/endpoints")?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return
+        j.optString("fp").ifBlank { null }?.let { found -> if (fp == null) { fp = found; Hc.save() } } // first contact: pin it
         val a = j.optJSONArray("urls") ?: return
         val fresh = (0 until a.length()).map { a.getJSONObject(it).let { o -> Endpoint(o.getString("kind"), o.getString("url"), o.optString("token").ifBlank { null }, o.optString("hub").ifBlank { null }) } }
         if (fresh.isNotEmpty()) {
@@ -99,7 +128,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
 
     private suspend fun raw(e: Endpoint, method: String, path: String, body: String? = null): String? = withContext(Dispatchers.IO) {
         try {
-            val c = Net.open(e.url, method, path, e.token ?: token, 4000, connectMs = 2000)
+            val c = Net.open(urlOf(e), method, path, e.token ?: token, 4000, connectMs = 2000, pin = pinFor(e))
             if (body != null) {
                 c.doOutput = true
                 c.setRequestProperty("Content-Type", "application/json")
@@ -129,12 +158,49 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
     suspend fun array(path: String): JSONArray? = call("GET", path)?.let { runCatching { JSONArray(it) }.getOrNull() }
     suspend fun post(path: String, body: JSONObject = JSONObject()): Boolean = call("POST", path, body) != null
 
+    /**
+     * A request that may need root on the machine (power modes, services, power actions). It first tries as before; if the
+     * machine says it needs the user's doas password, the saved one is sent (after a fingerprint/face/PIN unlock when
+     * needed), and if there is none the app asks for it ([Hc.pwRequest]). Returns the HTTP status and JSON body.
+     */
+    suspend fun privPost(path: String, body: JSONObject = JSONObject(), readTimeoutMs: Int = 200_000): Pair<Int, JSONObject?> {
+        var pw: String? = null
+        for (round in 0..2) {
+            val (code, j) = postSlowWith(path, body, readTimeoutMs, pw)
+            val needs = j?.optBoolean("needs_password") == true || j?.optString("error") == "password_required"
+            val wrong = j?.optBoolean("wrong_password") == true || j?.optString("error") == "wrong_password"
+            if (!needs && !wrong) return code to j
+            if (wrong) Hc.forgetPassword(this)
+            pw = Hc.passwordFor(this, wrong) ?: return code to j // the user cancelled
+        }
+        return 0 to null
+    }
+
+    private suspend fun postSlowWith(path: String, body: JSONObject, readTimeoutMs: Int, pw: String?): Pair<Int, JSONObject?> {
+        val e = active ?: resolve() ?: return 0 to null
+        return withContext(Dispatchers.IO) {
+            try {
+                val c = Net.open(urlOf(e), "POST", path, e.token ?: token, 6000, pin = pinFor(e))
+                c.readTimeout = readTimeoutMs
+                if (pw != null) c.setRequestProperty("X-Homectl-Pass", android.util.Base64.encodeToString(pw.toByteArray(), android.util.Base64.NO_WRAP))
+                c.doOutput = true
+                c.setRequestProperty("Content-Type", "application/json")
+                c.outputStream.use { it.write(body.toString().toByteArray()) }
+                val code = c.responseCode
+                val text = (if (code < 400) c.inputStream else c.errorStream)?.bufferedReader()?.readText().orEmpty()
+                code to runCatching { JSONObject(text) }.getOrNull()
+            } catch (_: Exception) {
+                0 to null
+            }
+        }
+    }
+
     suspend fun upload(ctx: Context, uri: Uri, fileName: String): Boolean {
         val e = active ?: resolve() ?: return false
         return withContext(Dispatchers.IO) {
             try {
                 val name = java.net.URLEncoder.encode(fileName, "UTF-8").replace("+", "%20")
-                val c = Net.open(e.url, "POST", "/api/files/$name", e.token ?: token, 5000)
+                val c = Net.open(urlOf(e), "POST", "/api/files/$name", e.token ?: token, 5000, pin = pinFor(e))
                 c.doOutput = true
                 c.setChunkedStreamingMode(65536)
                 ctx.contentResolver.openInputStream(uri)!!.use { i -> c.outputStream.use { o -> i.copyTo(o) } }
@@ -149,7 +215,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
 
     /** WebSocket URL for terminal session [sid] on the active address. */
     fun termUrl(sid: String, shell: String? = null): String? =
-        active?.let { it.url.replaceFirst("http", "ws") + "/api/term?t=${it.token ?: token}&s=$sid" + (shell?.let { sh -> "&sh=" + Uri.encode(sh) } ?: "") }
+        active?.let { localBase(it).replaceFirst("http", "ws") + "/api/term?t=${it.token ?: token}&s=$sid" + (shell?.let { sh -> "&sh=" + Uri.encode(sh) } ?: "") }
 
     suspend fun delete(path: String): Boolean = call("DELETE", path) != null
 
@@ -158,7 +224,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         val e = active ?: resolve() ?: return null
         return withContext(Dispatchers.IO) {
             try {
-                val c = Net.open(e.url, "GET", pathQuery, e.token ?: token, 6000)
+                val c = Net.open(urlOf(e), "GET", pathQuery, e.token ?: token, 6000, pin = pinFor(e))
                 c.readTimeout = 60000
                 if (range != null) c.setRequestProperty("Range", range)
                 if (c.responseCode !in 200..299) { c.disconnect(); return@withContext null }
@@ -184,7 +250,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         val e = active ?: resolve() ?: return 0 to null
         return withContext(Dispatchers.IO) {
             try {
-                val c = Net.open(e.url, "POST", path, e.token ?: token, 6000)
+                val c = Net.open(urlOf(e), "POST", path, e.token ?: token, 6000, pin = pinFor(e))
                 c.readTimeout = readTimeoutMs
                 c.doOutput = true
                 c.setRequestProperty("Content-Type", "application/json")
@@ -202,7 +268,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         val e = active ?: resolve() ?: return 0 to null
         return withContext(Dispatchers.IO) {
             try {
-                val c = Net.open(e.url, "GET", pathQuery, e.token ?: token, 6000)
+                val c = Net.open(urlOf(e), "GET", pathQuery, e.token ?: token, 6000, pin = pinFor(e))
                 c.readTimeout = readTimeoutMs
                 val code = c.responseCode
                 val text = (if (code < 400) c.inputStream else c.errorStream)?.bufferedReader()?.readText().orEmpty()
@@ -218,7 +284,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         val e = active ?: resolve() ?: return false
         return withContext(Dispatchers.IO) {
             try {
-                val c = Net.open(e.url, "POST", "/api/fs/upload?dir=${Uri.encode(dir)}&name=${Uri.encode(fileName)}", e.token ?: token, 5000)
+                val c = Net.open(urlOf(e), "POST", "/api/fs/upload?dir=${Uri.encode(dir)}&name=${Uri.encode(fileName)}", e.token ?: token, 5000, pin = pinFor(e))
                 c.doOutput = true
                 c.setChunkedStreamingMode(65536)
                 ctx.contentResolver.openInputStream(uri)!!.use { i -> c.outputStream.use { o -> i.copyTo(o) } }
@@ -233,8 +299,12 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
 }
 
 object Net {
-    fun open(base: String, method: String, path: String, token: String?, ms: Int, connectMs: Int = ms): HttpURLConnection =
+    fun open(base: String, method: String, path: String, token: String?, ms: Int, connectMs: Int = ms, pin: String? = null): HttpURLConnection =
         (URL(base + path).openConnection() as HttpURLConnection).apply {
+            if (pin != null && this is javax.net.ssl.HttpsURLConnection) {
+                sslSocketFactory = Pin.factory(pin)
+                hostnameVerifier = Pin.anyHost
+            }
             requestMethod = method
             connectTimeout = connectMs
             readTimeout = ms * 2
@@ -273,6 +343,28 @@ object Hc {
     var compositorOff by mutableStateOf(true)
     fun updateCompositorOff(v: Boolean) { compositorOff = v; prefs.edit().putBoolean("compoff", v).apply() }
 
+    // ---- saved root passwords ----
+    class PwRequest(val machine: Machine, val wrong: Boolean, val answer: (String?) -> Unit)
+    /** Set while the app needs to ask for a machine's doas password; App shows the dialog. */
+    var pwRequest by mutableStateOf<PwRequest?>(null)
+    /** The activity that can show the unlock prompt. */
+    var activity: androidx.fragment.app.FragmentActivity? = null
+
+    fun hasSavedPassword(m: Machine) = Keyring.has("pw.${m.id}")
+    fun forgetPassword(m: Machine) = Keyring.remove("pw.${m.id}")
+
+    /** The machine's saved doas password (unlocking first if needed) or, if none is saved (or [forceAsk]), asks for it. */
+    suspend fun passwordFor(m: Machine, forceAsk: Boolean = false): String? {
+        val act = activity ?: return null
+        if (!forceAsk && Keyring.has("pw.${m.id}")) {
+            Keyring.read(act, "pw.${m.id}", "Use the saved password for ${m.name}")?.let { return it }
+        }
+        return kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+            pwRequest = PwRequest(m, forceAsk) { pw -> pwRequest = null; if (cont.isActive) cont.resume(pw) {} }
+            cont.invokeOnCancellation { pwRequest = null }
+        }
+    }
+
     /** A folder another screen asked the Files tab to show (consumed by Files). */
     var openPath by mutableStateOf<String?>(null)
 
@@ -302,13 +394,17 @@ object Hc {
         perCoreGraphs = prefs.getBoolean("percore", false)
         compositorOff = prefs.getBoolean("compoff", true)
         lastTab = prefs.getInt("tab", 0)
-        prefs.getString("machines", null)?.let { s ->
+        Keyring.init(ctx)
+        // tokens are kept encrypted in the keyring; a plain list from an older version is moved there on first run
+        val stored = (Keyring.get("machines", strong = false) as? Keyring.Got.Value)?.text ?: prefs.getString("machines", null)
+        stored?.let { s ->
             val a = JSONArray(s)
             for (i in 0 until a.length()) {
                 val o = a.getJSONObject(i)
-                machines.add(Machine(o.getString("id"), o.getString("name"), o.getString("token"), parseEndpoints(o.getJSONArray("endpoints"))))
+                machines.add(Machine(o.getString("id"), o.getString("name"), o.getString("token"), parseEndpoints(o.getJSONArray("endpoints")), o.optString("fp").ifBlank { null }))
             }
         } ?: migrateV1()
+        if (machines.isNotEmpty() && prefs.getString("machines", null) != null) save() // moves an old plain-text list into the keyring
     }
 
     /** Version 0.2 stored a single machine in flat keys. */
@@ -327,11 +423,12 @@ object Hc {
     fun save() {
         val a = JSONArray()
         machines.forEach { m ->
-            a.put(JSONObject().put("id", m.id).put("name", m.name).put("token", m.token).put("endpoints", JSONArray().also { ea ->
+            a.put(JSONObject().put("id", m.id).put("name", m.name).put("token", m.token).put("fp", m.fp ?: "").put("endpoints", JSONArray().also { ea ->
                 m.endpoints.forEach { ea.put(JSONObject().put("kind", it.kind).put("url", it.url).put("token", it.token ?: "").put("hub", it.hub ?: "")) }
             }))
         }
-        prefs.edit().putString("machines", a.toString()).putString("selected", selectedId).apply()
+        val sealed = runCatching { Keyring.put("machines", a.toString(), strong = false) }.isSuccess
+        prefs.edit().apply { if (sealed) remove("machines") else putString("machines", a.toString()) }.putString("selected", selectedId).apply()
     }
 
     fun select(m: Machine) {
@@ -377,7 +474,7 @@ object Hc {
             urls = listOf(link.trim().trimEnd('/'))
         }
         if (token.isEmpty() || urls.isEmpty()) return false
-        add(Machine(token.take(10), name, token, urls.map { Endpoint(kindOf(it), it.trimEnd('/')) }))
+        add(Machine(token.take(10), name, token, urls.map { Endpoint(kindOf(it), it.trimEnd('/')) }, uri.getQueryParameter("fp")?.ifBlank { null }))
         return true
     }
 

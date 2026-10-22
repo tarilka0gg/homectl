@@ -7,10 +7,12 @@ mod govee;
 mod monitor;
 mod net;
 mod pair;
+mod privileged;
 mod relay;
 mod sensors;
 mod swr;
 mod sys;
+mod tls;
 mod term;
 
 use axum::{
@@ -40,6 +42,8 @@ pub(crate) struct App {
     tunnel_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub(crate) failures: AtomicU32,
     pub(crate) peers: relay::Peers,
+    pub(crate) tls_fp: String,
+    pub(crate) tls_only: std::sync::atomic::AtomicBool,
     mon: monitor::Monitor,
     sessions: Arc<term::Sessions>,
     pairing: pair::Pairing,
@@ -110,7 +114,29 @@ async fn ping() -> impl IntoResponse {
 }
 
 async fn endpoints(State(app): S) -> impl IntoResponse {
-    Json(net::endpoints(app.port, &app.tunnel).await)
+    Json(net::endpoints(app.port, &app.tunnel, &app.tls_fp).await)
+}
+
+/// Whether encrypted links are available, the certificate fingerprint to pin, and the encrypted-only switch.
+async fn security_get(State(app): S) -> impl IntoResponse {
+    Json(json!({"tls": !app.tls_fp.is_empty(), "fp": app.tls_fp, "tls_only": app.tls_only.load(Ordering::Relaxed)}))
+}
+
+#[derive(Deserialize)]
+struct SecurityIn {
+    tls_only: bool,
+}
+
+async fn security_set(State(app): S, Json(s): Json<SecurityIn>) -> StatusCode {
+    if s.tls_only && app.tls_fp.is_empty() {
+        return StatusCode::CONFLICT;
+    }
+    let marker = config_dir().join("tls-only");
+    let ok = if s.tls_only { std::fs::write(&marker, "").is_ok() } else { !marker.exists() || std::fs::remove_file(&marker).is_ok() };
+    if ok {
+        app.tls_only.store(s.tls_only, Ordering::Relaxed);
+    }
+    status(ok)
 }
 
 async fn stats() -> impl IntoResponse {
@@ -221,13 +247,13 @@ async fn actions_get() -> impl IntoResponse {
     Json(actions::list().await)
 }
 
-async fn actions_run(Path((id, state)): Path<(String, String)>) -> Response {
+async fn actions_run(Path((id, state)): Path<(String, String)>, headers: HeaderMap) -> Response {
     let on = match state.as_str() {
         "on" => true,
         "off" => false,
         _ => return StatusCode::BAD_REQUEST.into_response(),
     };
-    match actions::run(&id, on).await {
+    match actions::run(&id, on, privileged::password_from(&headers)).await {
         Ok(v) => Json(v).into_response(),
         Err((code, e)) => (StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), Json(json!({ "error": e }))).into_response(),
     }
@@ -353,8 +379,13 @@ async fn wifi_power(Json(c): Json<On>) -> StatusCode {
 async fn services_get() -> impl IntoResponse {
     Json(ctl::services().await)
 }
-async fn service_post(Path((name, action)): Path<(String, String)>) -> StatusCode {
-    status(ctl::service_action(&name, &action).await)
+async fn service_post(Path((name, action)): Path<(String, String)>, headers: HeaderMap) -> Response {
+    match ctl::service_action(&name, &action, privileged::password_from(&headers)).await {
+        ctl::Priv::Done => StatusCode::NO_CONTENT.into_response(),
+        ctl::Priv::NeedsPassword => (StatusCode::FORBIDDEN, Json(json!({"error": "password_required"}))).into_response(),
+        ctl::Priv::WrongPassword => (StatusCode::FORBIDDEN, Json(json!({"error": "wrong_password"}))).into_response(),
+        ctl::Priv::Failed => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 async fn monitors_get() -> impl IntoResponse {
     Json(swr::get("monitors", std::time::Duration::from_secs(120), || ctl::monitors()).await)
@@ -395,8 +426,17 @@ async fn cam_post(Path(n): Path<u8>, Json(c): Json<CamSet>) -> StatusCode {
     status(ctl::webcam_set(n, c.id, c.value))
 }
 
-async fn power_post(Path(action): Path<String>) -> StatusCode {
-    status(ctl::power(&action))
+async fn power_post(Path(action): Path<String>, headers: HeaderMap) -> StatusCode {
+    status(ctl::power(&action, privileged::password_from(&headers)))
+}
+
+/// Checks that the machine accepts the doas password the app holds (or that none is needed).
+async fn priv_test(headers: HeaderMap) -> impl IntoResponse {
+    Json(privileged::test(privileged::password_from(&headers)).await)
+}
+
+async fn priv_rapl(headers: HeaderMap) -> impl IntoResponse {
+    Json(privileged::allow_rapl(privileged::password_from(&headers)).await)
 }
 
 async fn proc_signal(Path((pid, sig)): Path<(i32, String)>) -> StatusCode {
@@ -460,7 +500,7 @@ async fn pair_confirm(State(app): S, headers: HeaderMap, Json(r): Json<PairConfi
         return StatusCode::FORBIDDEN.into_response();
     }
     if app.pairing.confirm(&r.id, &r.code) {
-        Json(json!({ "token": app.token, "name": hostname() })).into_response()
+        Json(json!({ "token": app.token, "name": hostname(), "fp": app.tls_fp })).into_response()
     } else {
         slow_down(&app).await;
         StatusCode::UNAUTHORIZED.into_response()
@@ -513,6 +553,7 @@ async fn main() {
     if std::env::args().nth(1).as_deref() == Some("pair") {
         return net::pair(port, &token).await;
     }
+    let tls = tls::load_or_create(&config_dir()).map_err(|e| eprintln!("encrypted connections unavailable: {e}")).ok();
     let inbox = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join("homectl-inbox");
     std::fs::create_dir_all(&inbox).expect("create inbox");
     let tunnel: net::TunnelUrl = Default::default();
@@ -525,6 +566,8 @@ async fn main() {
         tunnel_task: Mutex::new(tunnel_task),
         failures: AtomicU32::new(0),
         peers: relay::Peers::load(config_dir()),
+        tls_fp: tls.as_ref().map(|t| t.fingerprint.clone()).unwrap_or_default(),
+        tls_only: std::sync::atomic::AtomicBool::new(config_dir().join("tls-only").exists()),
         mon: monitor::start(),
         sessions: Default::default(),
         pairing: Default::default(),
@@ -581,6 +624,9 @@ async fn main() {
         .route("/fs/archive/list", get(fs::archive_list))
         .route("/fs/archive/extract", post(fs::archive_extract))
         .route("/fs/archive/file", get(fs::archive_file))
+        .route("/security", get(security_get).post(security_set))
+        .route("/priv/test", post(priv_test))
+        .route("/priv/rapl", post(priv_rapl))
         .route("/tunnel", get(tunnel_get).post(tunnel_post))
         .route("/peers", get(relay::list).post(relay::upsert))
         .route("/peers/{id}", axum::routing::delete(relay::remove))
@@ -596,10 +642,44 @@ async fn main() {
         .route("/api/pair/pending", get(pair_pending))
         .route("/api/term", get(term_ws))
         .route("/peer/{id}/{*rest}", axum::routing::any(relay::proxy).layer(axum::extract::DefaultBodyLimit::disable()))
-        .with_state(app);
+        .with_state(app.clone());
 
     let router = open.nest("/api", api);
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
-    eprintln!("homectl listening on {addr}");
-    axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+    eprintln!("homectl listening on {addr} ({})", if tls.is_some() { "plain and encrypted" } else { "plain only" });
+    let acceptor = tls.map(|t| t.acceptor);
+    loop {
+        let (tcp, peer) = match listener.accept().await {
+            Ok(c) => c,
+            Err(_) => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            }
+        };
+        let (router, acceptor, state) = (router.clone(), acceptor.clone(), app.clone());
+        tokio::spawn(async move {
+            // one port, two protocols: a TLS ClientHello starts with 0x16, plain HTTP with a letter
+            let mut first = [0u8; 1];
+            if !matches!(tokio::time::timeout(std::time::Duration::from_secs(10), tcp.peek(&mut first)).await, Ok(Ok(1))) {
+                return;
+            }
+            let svc = router.layer(axum::Extension(ConnectInfo(peer)));
+            let service = hyper::service::service_fn(move |req: axum::http::Request<hyper::body::Incoming>| tower::ServiceExt::oneshot(svc.clone(), req));
+            let builder = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+            if first[0] == 0x16 {
+                let Some(acc) = acceptor else { return };
+                let Ok(stream) = acc.accept(tcp).await else { return };
+                let _ = builder.serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(stream), service).await;
+            } else {
+                // "encrypted only": plain HTTP stays open for this machine itself and for the tailnet (already WireGuard-encrypted)
+                let ip = peer.ip();
+                let trusted = ip.is_loopback() || matches!(ip, std::net::IpAddr::V4(v4) if v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1]));
+                if state.tls_only.load(Ordering::Relaxed) && !trusted {
+                    let _ = tcp.try_write(b"HTTP/1.1 426 Upgrade Required\r\ncontent-length: 41\r\nconnection: close\r\n\r\nthis machine only accepts encrypted links");
+                    return;
+                }
+                let _ = builder.serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(tcp), service).await;
+            }
+        });
+    }
 }

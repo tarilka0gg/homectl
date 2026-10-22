@@ -11,6 +11,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 private val powerColor = Color(0xFFFFA726)
@@ -79,8 +80,16 @@ fun PowerSection(d: JSONObject, hist: HistView, gpus: List<JSONObject>) {
         if (batW != null) Line("Battery ${bat.str("status").lowercase()}", "${"%.1f".format(batW)} W")
         gpuW.forEach { Line(it.str("name").replace("NVIDIA GeForce ", "").replace("Laptop GPU", "").trim().ifBlank { "GPU" }, "${"%.1f".format(it.optDouble("power_w"))} W") }
         if (denied) {
-            Text("CPU power needs permission to read the energy counters (root-only since the PLATYPUS side-channel fix). To allow it until the next reboot, run on this machine:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            SelectionContainer { Text("doas chmod a+r /sys/class/powercap/intel-rapl:*/energy_uj", style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace) }
+            val scope = rememberCoroutineScope()
+            val ctx = androidx.compose.ui.platform.LocalContext.current
+            Text("CPU power needs permission to read the energy counters (root-only since the PLATYPUS side-channel fix). The app can allow it until the next reboot.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            FilledTonalButton({
+                scope.launch {
+                    val (_, j) = Hc.cur?.privPost("/api/priv/rapl", org.json.JSONObject(), 30_000) ?: (0 to null)
+                    android.widget.Toast.makeText(ctx, if (j?.optBoolean("ok") == true) "Allowed — power appears in a moment" else "Couldn't allow it", android.widget.Toast.LENGTH_LONG).show()
+                }
+            }) { Text("Allow reading CPU power") }
+            SelectionContainer { Text("or on the machine: doas chmod a+r /sys/class/powercap/intel-rapl:*/energy_uj", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace) }
         }
     }
 }

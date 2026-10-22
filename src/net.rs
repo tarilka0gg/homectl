@@ -58,7 +58,7 @@ async fn out(cmd: &str, args: &[&str]) -> String {
     }
 }
 
-pub async fn endpoints(port: u16, tunnel: &TunnelUrl) -> Value {
+pub async fn endpoints(port: u16, tunnel: &TunnelUrl, fp: &str) -> Value {
     let mut urls: Vec<Value> = vec![];
     if let Some(ip) = out("tailscale", &["ip", "-4"]).await.lines().next() {
         urls.push(json!({"kind": "tailscale", "url": format!("http://{ip}:{port}")}));
@@ -76,7 +76,7 @@ pub async fn endpoints(port: u16, tunnel: &TunnelUrl) -> Value {
         urls.push(json!({"kind": "tunnel", "url": u}));
     }
     let name = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
-    json!({ "name": name.trim(), "urls": urls })
+    json!({ "name": name.trim(), "urls": urls, "fp": fp })
 }
 
 /// `homectl pair`: print a homectl://pair link (and QR) for the app, using the running daemon's endpoint list.
@@ -95,6 +95,9 @@ pub async fn pair(port: u16, token: &str) {
     let mut link = format!("homectl://pair?t={token}&n={}", v["name"].as_str().unwrap_or("homectl"));
     for u in v["urls"].as_array().into_iter().flatten() {
         link.push_str(&format!("&u={}", u["url"].as_str().unwrap_or("")));
+    }
+    if let Some(fp) = v["fp"].as_str().filter(|f| !f.is_empty()) {
+        link.push_str(&format!("&fp={fp}"));
     }
     println!("{link}\n");
     let _ = std::process::Command::new("qrencode").args(["-t", "ANSIUTF8", &link]).status();

@@ -71,6 +71,8 @@ fun SystemScreen(onAddMachine: () -> Unit) {
         }
     }
 
+    if (m != null) SecuritySection(m)
+
     var modesNonce by remember { mutableIntStateOf(0) }
     val modes = loaded(modesNonce, 6000, "sys-modes") { Hc.array("/api/actions") }
     var modeConfirm by remember { mutableStateOf<Triple<JSONObject, Boolean, String>?>(null) }
@@ -80,7 +82,7 @@ fun SystemScreen(onAddMachine: () -> Unit) {
         val id = a.str("id")
         modeBusy = modeBusy + id
         scope.launch {
-            val (code, j) = Hc.cur?.postSlow("/api/actions/$id/${if (on) "on" else "off"}", JSONObject(), 200_000) ?: (0 to null)
+            val (code, j) = Hc.cur?.privPost("/api/actions/$id/${if (on) "on" else "off"}", JSONObject(), 200_000) ?: (0 to null)
             modeBusy = modeBusy - id
             modesNonce++
             when {
@@ -160,7 +162,7 @@ fun SystemScreen(onAddMachine: () -> Unit) {
             onDismissRequest = { confirm = null },
             title = { Text("$label ${m?.name}?") },
             text = { Text(if (action == "poweroff") "You can't turn it back on from here." else "The machine will be unreachable for a moment.") },
-            confirmButton = { TextButton({ scope.launch { Hc.post("/api/power/$action") }; confirm = null }) { Text(label) } },
+            confirmButton = { TextButton({ scope.launch { Hc.cur?.privPost("/api/power/$action") }; confirm = null }) { Text(label) } },
             dismissButton = { TextButton({ confirm = null }) { Text("Cancel") } },
         )
     }
@@ -176,10 +178,10 @@ fun SystemScreen(onAddMachine: () -> Unit) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) {
                     SwitchRow(n, running, s.str("state")) { on ->
-                        scope.launch { Hc.post("/api/services/$n/${if (on) "start" else "stop"}"); delay(800); nonce++ }
+                        scope.launch { Hc.cur?.privPost("/api/services/$n/${if (on) "start" else "stop"}"); delay(800); nonce++ }
                     }
                 }
-                if (running) TextButton({ scope.launch { Hc.post("/api/services/$n/restart"); delay(800); nonce++ } }) { Text("Restart") }
+                if (running) TextButton({ scope.launch { Hc.cur?.privPost("/api/services/$n/restart"); delay(800); nonce++ } }) { Text("Restart") }
             }
         } ?: Text("Loading…")
     }
@@ -227,5 +229,60 @@ fun SystemScreen(onAddMachine: () -> Unit) {
             }
         }
         Button(onAddMachine) { Text("Add machine") }
+    }
+}
+
+
+/** Saved root password, encrypted-link status and the "encrypted only" switch for the selected machine. */
+@Composable
+private fun SecuritySection(m: Machine) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var nonce by remember { mutableIntStateOf(0) }
+    val sec = loaded(nonce to m.id, 0, "sec-${m.id}") { Hc.json("/api/security") }
+    val saved = remember(nonce, m.id) { Hc.hasSavedPassword(m) }
+    var testing by remember { mutableStateOf(false) }
+    Section("Security — ${m.name}") {
+        val s = sec.value
+        val pinned = m.fp != null
+        Text(
+            when {
+                m.certProblem -> "⚠ This machine's certificate does not match the one pinned when you paired. The app refuses to connect — someone may be intercepting the link, or the machine's certificate was replaced (then pair again)."
+                s == null -> "Checking…"
+                pinned && s.optBoolean("tls") -> "🔒 Encrypted link, certificate pinned: ${m.fp!!.take(8).chunked(4).joinToString(" ")}… (SHA-256)"
+                s.optBoolean("tls") -> "This machine can encrypt links, but this pairing has no pinned certificate. Pair again to pin it."
+                else -> "This machine is running an older homectl without encrypted links."
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (m.certProblem) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+        )
+        if (s != null && s.optBoolean("tls")) {
+            SwitchRow("Refuse plain connections", s.optBoolean("tls_only"), "from other devices on the network; this machine itself and the Tailscale network (already encrypted) are exempt") { on ->
+                scope.launch { val ok = Hc.post("/api/security", body("tls_only" to on)); if (!ok) Toast.makeText(ctx, "Couldn't change it", Toast.LENGTH_SHORT).show(); nonce++ }
+            }
+        }
+        var block by remember { mutableStateOf(Hc.memBool("block.screenshots")) }
+        SwitchRow("Hide the app from screenshots", block, "also blanks the app-switcher preview; applies to this phone") { on ->
+            block = on; Hc.memPutBool("block.screenshots", on); (Hc.activity as? MainActivity)?.applyScreenshotBlock()
+        }
+        HorizontalDivider()
+        Text("Root password (doas)", style = MaterialTheme.typography.titleSmall)
+        Text(
+            if (saved) "Saved in this phone's keyring. It is encrypted with a key that needs your fingerprint, face or screen lock, and is sent only with the one action that needs it."
+            else "Not saved. Actions that need root (power modes, services, restart) will ask for it when needed — you can save it then.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton({
+                testing = true
+                scope.launch {
+                    val (code, j) = m.privPost("/api/priv/test", JSONObject(), 30_000)
+                    testing = false
+                    nonce++ // the card shows whether a password is now saved
+                    Toast.makeText(ctx, when { j?.optBoolean("ok") == true -> "Root access works"; code == 0 -> "Cancelled or no answer"; j?.optBoolean("wrong_password") == true -> "Wrong password"; else -> "Not allowed" }, Toast.LENGTH_SHORT).show()
+                }
+            }, enabled = !testing) { Text("Test root access") }
+            if (saved) OutlinedButton({ Hc.forgetPassword(m); nonce++ }) { Text("Forget password") }
+        }
     }
 }

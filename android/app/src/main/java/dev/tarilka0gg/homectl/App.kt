@@ -77,7 +77,7 @@ fun App() {
                 actions = {
                     AssistChip(
                         onClick = {},
-                        label = { Text(if (m.offline) "offline" else m.active?.kind ?: "connecting…") },
+                        label = { Text(if (m.certProblem) "certificate!" else if (m.offline) "offline" else (m.active?.kind ?: "connecting…") + if (m.active?.let { m.pinFor(it) } != null) " 🔒" else "") },
                         colors = AssistChipDefaults.assistChipColors(
                             containerColor = if (m.offline) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer,
                         ),
@@ -129,8 +129,8 @@ private fun AddMachineScreen(canCancel: Boolean, onDone: () -> Unit) {
     }
     val known = Hc.machines.flatMap { m -> m.endpoints.map { it.url } }.toSet()
 
-    fun finish(f: Found, token: String) {
-        val m = Machine(token.take(10), f.name, token, listOf(Endpoint(f.kind, f.url)))
+    fun finish(f: Found, token: String, fp: String? = null) {
+        val m = Machine(token.take(10), f.name, token, listOf(Endpoint(f.kind, f.url)), fp)
         Hc.add(m)
         scope.launch { m.resolve() }
         onDone()
@@ -197,7 +197,7 @@ private fun AddMachineScreen(canCancel: Boolean, onDone: () -> Unit) {
                         val r: JSONObject? = Net.postJson(f.url, "/api/pair/confirm", body("id" to id, "code" to code))
                         if (r == null) { Toast.makeText(ctx, "Wrong or expired code", Toast.LENGTH_LONG).show(); return@launch }
                         pending = null
-                        finish(Found(r.optString("name", f.name), f.url, f.kind), r.getString("token"))
+                        finish(Found(r.optString("name", f.name), f.url, f.kind), r.getString("token"), r.optString("fp").ifBlank { null })
                     }
                 }, enabled = code.length == 6) { Text("Pair") }
             },

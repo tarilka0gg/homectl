@@ -153,7 +153,7 @@ pub async fn list() -> Value {
     json!(v)
 }
 
-pub async fn run(id: &str, on: bool) -> Result<Value, (u16, String)> {
+pub async fn run(id: &str, on: bool, password: Option<String>) -> Result<Value, (u16, String)> {
     let d = load().into_iter().find(|d| d.id == id).ok_or((404, "unknown power mode".to_string()))?;
     {
         let mut g = RUNNING.lock().unwrap();
@@ -165,6 +165,23 @@ pub async fn run(id: &str, on: bool) -> Result<Value, (u16, String)> {
     let res = if dry() {
         eprintln!("DRYRUN action {id} {} -> {cmd}", if on { "on" } else { "off" });
         Ok((0, format!("dry run: {cmd}")))
+    } else if let Some(pw) = password {
+        // the user's own doas password: run the same command on a terminal and answer the prompt
+        let c = cmd.replace("doas -n ", "doas ");
+        match tokio::task::spawn_blocking(move || crate::privileged::run_pty("sh", &["-c".to_string(), c], &pw, Duration::from_secs(180))).await {
+            Ok(Ok(o)) => {
+                let mut text = o.text;
+                if text.len() > 2000 {
+                    text = format!("…{}", &text[text.len() - 2000..]);
+                }
+                if o.code != 0 && text.contains("Authorization failed") {
+                    text = "wrong password. Authorization failed".into();
+                }
+                Ok((o.code, text))
+            }
+            Ok(Err(e)) => Err((500, e)),
+            Err(_) => Err((500, "failed".into())),
+        }
     } else {
         match tokio::time::timeout(Duration::from_secs(180), Command::new("sh").args(["-c", &cmd]).stdin(Stdio::null()).output()).await {
             Ok(Ok(o)) => {
@@ -192,5 +209,7 @@ pub async fn run(id: &str, on: bool) -> Result<Value, (u16, String)> {
             None => "The command needs root: allow it in /etc/doas.conf with a `permit nopass` rule.".into(),
         }
     });
-    Ok(json!({"ok": code == 0, "code": code, "output": output, "hint": hint}))
+    let needs_password = code != 0 && output.contains("Authorization required");
+    let wrong_password = code != 0 && output.contains("wrong password");
+    Ok(json!({"ok": code == 0, "code": code, "output": output, "hint": hint, "needs_password": needs_password, "wrong_password": wrong_password}))
 }

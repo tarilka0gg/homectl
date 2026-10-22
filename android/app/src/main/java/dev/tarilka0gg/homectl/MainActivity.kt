@@ -3,7 +3,7 @@ package dev.tarilka0gg.homectl
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
@@ -14,10 +14,12 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Hc.init(this)
+        Hc.activity = this
+        applyScreenshotBlock()
         handle(intent)
         // The soft keyboard resizes the window; compare the visible area with the screen to know if it is up.
         val root = window.decorView
@@ -26,7 +28,23 @@ class MainActivity : ComponentActivity() {
             root.getWindowVisibleDisplayFrame(r)
             TerminalHub.imeVisible = r.bottom < resources.displayMetrics.heightPixels * 0.8
         }
-        setContent { HomectlTheme { App() } }
+        setContent { HomectlTheme { LockGate(this) { App(); Hc.pwRequest?.let { PasswordDialog(it, this) } } } }
+    }
+
+    /** Optional: no screenshots, and a blank card in the app switcher (Security section on the System tab). */
+    fun applyScreenshotBlock() {
+        if (Hc.memBool("block.screenshots")) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        LockState.onStop()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        LockState.onStart()
     }
 
     override fun onResume() {

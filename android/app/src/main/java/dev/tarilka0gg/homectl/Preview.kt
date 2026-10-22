@@ -415,7 +415,7 @@ private fun MediaViewer(m: Machine, f: RemoteFile) {
     var failed by remember { mutableStateOf(false) }
     var local by remember { mutableStateOf<File?>(null) }
     var progress by remember { mutableStateOf<Float?>(0f) }
-    val base = m.active?.url
+    val base = m.active?.let { m.localBase(it) }
     // files on a machine stream straight from it (Range requests); entries inside an archive are fetched first
     LaunchedEffect(f.path, f.archive) { if (f.archive != null) local = fetchToCache(ctx, m, f) { progress = it } ?: run { failed = true; null } }
     if (failed) {
