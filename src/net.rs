@@ -77,7 +77,7 @@ pub async fn endpoints(port: u16, tunnel: &TunnelUrl, fp: &str) -> Value {
         urls.push(json!({"kind": "tunnel", "url": u}));
     }
     let name = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
-    json!({ "name": name.trim(), "urls": urls, "fp": fp, "rv": rendezvous_topic() })
+    json!({ "name": name.trim(), "urls": urls, "fp": fp, "rv": rendezvous_topic(), "version": env!("CARGO_PKG_VERSION") })
 }
 
 /// `homectl pair`: print a homectl://pair link (and QR) for the app, using the running daemon's endpoint list.
@@ -186,4 +186,26 @@ fn announce_loop(url: TunnelUrl, token: String) {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn announcement_signature_matches_the_app_and_depends_on_everything() {
+        // known answer: HMAC-SHA256(key "tok", "https://a-b.trycloudflare.com|1700000000000"), computed independently
+        let s = sign_announcement("tok", "https://a-b.trycloudflare.com", 1_700_000_000_000);
+        assert_eq!(s, "f58b83504398af3da478c34380cec40e24e6e570aae5b8840f78a0944ba5cd35");
+        assert_ne!(s, sign_announcement("tok2", "https://a-b.trycloudflare.com", 1_700_000_000_000));
+        assert_ne!(s, sign_announcement("tok", "https://evil.trycloudflare.com", 1_700_000_000_000));
+        assert_ne!(s, sign_announcement("tok", "https://a-b.trycloudflare.com", 1_700_000_000_001));
+    }
+
+    #[test]
+    fn only_quick_tunnel_addresses_are_picked_out_of_cloudflared_output() {
+        assert_eq!(find_tunnel_url("2026 INF |  https://fun-name-here.trycloudflare.com  |").as_deref(), Some("https://fun-name-here.trycloudflare.com"));
+        assert_eq!(find_tunnel_url("INF visit https://example.com for docs"), None);
+        assert_eq!(find_tunnel_url("INF nothing here"), None);
+    }
 }

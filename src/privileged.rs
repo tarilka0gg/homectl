@@ -170,3 +170,30 @@ pub async fn allow_rapl(password: Option<String>) -> Value {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers(v: &str) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(HEADER, v.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn the_password_header_is_decoded_and_bad_input_rejected() {
+        assert_eq!(password_from(&headers("c2VjcmV0")).as_deref(), Some("secret"));
+        assert_eq!(password_from(&headers("0JRq0L3RltGH")).as_deref(), Some("Дjніч"), "non-ASCII passwords survive");
+        assert!(password_from(&headers("%%%")).is_none());
+        assert!(password_from(&axum::http::HeaderMap::new()).is_none());
+        assert!(password_from(&headers("")).is_none(), "an empty password is not a password");
+    }
+
+    #[test]
+    fn a_wrong_password_is_recognised_in_doas_output() {
+        let o = Out { code: 1, text: "doas: Authorization failed".into() };
+        assert!(o.wrong_password());
+        assert!(!Out { code: 0, text: "Authorization failed".into() }.wrong_password());
+    }
+}

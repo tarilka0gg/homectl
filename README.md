@@ -1,109 +1,128 @@
 # homectl
 
-Control your own computers and smart home from your phone. A small daemon runs on each machine; a native Android app (Material 3) finds them, pairs with a 6-digit code, and gives you a live system monitor, per-app audio mixer, terminal, power controls and lights — over your Wi-Fi, Tailscale, or a public tunnel when you have neither.
+Control your own computers and smart home from your phone. A small daemon runs on each machine; a native Android app (Material 3) finds them, pairs with a 6-digit code, and gives you a live system monitor, files, a persistent terminal, audio, power controls, lights and a shared clipboard — over your Wi-Fi, Tailscale, or a public tunnel when you are away from home.
 
 <p>
-<img src="docs/monitor.png" width="230" alt="Monitor">
-<img src="docs/controls.png" width="230" alt="Controls">
-<img src="docs/terminal.png" width="230" alt="Terminal">
+<img src="docs/monitor.png" width="190" alt="Monitor">
+<img src="docs/controls.png" width="190" alt="Controls">
+<img src="docs/terminal.png" width="190" alt="Terminal">
+<img src="docs/files.png" width="190" alt="Files">
 </p>
 
-## What's in the app
+> **Security first.** homectl gives whoever controls it a **shell, your files and power control**. Read [SECURITY.md](SECURITY.md) and
+> [docs/AWAY.md](docs/AWAY.md) before turning on the public tunnel. It is built for people who run their own machines; it is not a
+> hosted service and there is no account.
+
+## What it does
 
 | Tab | |
 |---|---|
-| **Monitor** | btop-style live view. CPU graph with per-core load *and temperature*; **each GPU** (iGPU and dGPU: load, VRAM, core/memory clocks, power, temperature, fan, with graphs); temperature graph and sensors (NVMe, DIMM); **fans** with RPM graph; memory/swap; network with **peaks**, totals and per-interface rates; disk I/O with peaks; disks; battery. **Per-core graphs** (one live graph per CPU thread, with temperature) or bars. A full **process table**: tap a column header (PID / NAME / CPU / MEM) to sort, tap again to reverse, search by name, command, user or PID, tap a process to terminate, kill, pause or resume it. Several machines (laptop *and* server) show side by side. |
-| **Controls** | **Screens off/on** (built-in panel, external monitors, compositor output). Govee **lights** (real on/off, brightness, colour). Switches that follow the real state: Wi-Fi, Bluetooth and each paired device, airplane mode, public tunnel, webcam toggles. Sliders for screen and monitor brightness. **Audio**: every usable output and input as its own row (volume, mute, pick the default; unplugged ones are hidden), plus a **per-app mixer**. |
-| **Terminal** | A real shell (xterm.js, canvas renderer, with Nerd Font symbols built in so fancy prompts — powerline, icons — draw correctly). The shell's size is the smallest attached screen, like tmux, so output wraps the same everywhere. **Sessions keep running on the machine** — leave the tab, close the app, lose Wi-Fi, and you reattach to the same screen. **Pick the shell** per session (＋ menu lists what's installed: fish, bash…) or switch the current one from ⋮. Multiple session tabs, **split view** (two terminals at once, can be different machines), **SSH** shortcut with history. Two rows of keys (Esc, Tab, Ctrl, Alt, arrows, F1–F12, Ctrl-combos…), keyboard show/hide button, **pinch to zoom** and A−/A+, touch scrolling, long-press to **select** text, Paste, and a **Buffer** view with the whole scrollback — filter it, select any part, or copy the last N lines. |
-| **Files** | Browse the machine's files with **thumbnails** for images. Tap a file to **preview** it: images (pinch/double-tap zoom, swipe through the folder), text and code, PDFs. **Look inside archives** (zip, tar, tar.gz, gz natively; 7z, rar, xz, bz2 … through `bsdtar` if installed) like a folder, preview files inside without unpacking, and **unzip** everything or just what you tick. Download to the phone (Downloads/homectl), open, share, upload, make folders. The machines also appear in Android's **own file picker**, so any app (Telegram, Gmail…) can attach files straight from them. |
-| **System** | **Power modes** (your `*-on.sh` / `*-off.sh` scripts, e.g. a deep-idle mode, with a confirmation first). **Update speed** (0.5 s – 5 s; machines sample slowly when nobody is watching to save power). Lock / suspend / restart / power off (with confirmation), services as switches, clipboard sync, send files. Share → **homectl** from any app sends files to the machine. |
+| **Monitor** | btop-style live view: CPU (per-core load, temperature, clocks, governor, throttling), every GPU, memory and swap, **per-disk activity** (busy %, read/write, IOPS, temperature, partitions, which processes use the disk, and a fast "what takes the space" view with open/delete), network, battery health and power draw, pressure (PSI), **all hardware sensors**, fans, and a sortable, searchable process table with terminate/kill/pause. Several machines side by side. |
+| **Controls** | Screens off/on and **brightness for every screen** (built-in panel and DDC/CI monitors), Govee lights with a **colour wheel** and white temperature (per light and for all), Wi-Fi/Bluetooth/airplane, per-device and per-app **audio mixer**, webcam controls, public-tunnel switch. |
+| **Terminal** | A real shell (xterm.js) that **keeps running on the machine**: leave, close the app, lose Wi-Fi, and reattach to the same screen. Pick the shell, several sessions, split view, special-key rows, scrollback buffer, SSH shortcut. |
+| **Files** | Browse with thumbnails and icons, **type a path**, **search**, back/forward (gestures included), **preview everything** (images, text, PDF, video, audio, hex), **edit text**, rename, delete, upload, unzip and look inside archives, **details** (owner, permissions, dates, checksums, image size…). The machines also appear in Android's own file picker. |
+| **System** | Power modes (your own on/off scripts), services, lock/suspend/reboot/power off, a **clipboard** you can send to and get from with pickers (text *and pictures*, plus Noctalia's history), an optional **common clipboard** that runs as a background service, send files, connection test, and the **Security** section (below). |
 
 ## Download
 
-Get the latest build from the **[Releases page](../../releases/latest)** (the repo is private: open it while logged in to GitHub, on the phone too). Or `gh release download --repo tarilka0gg/homectl`.
+Releases are on the **[Releases page](../../releases/latest)**:
 
 | File | What it is |
 |---|---|
-| `homectl-x.y.z.apk` | The Android app |
-| `homectl-linux-x86_64` | The daemon. Static binary: runs on any x86-64 Linux (Gentoo, Arch, Debian, Alpine…) |
-| `homectl-send-android-arm64` | Tiny file uploader for Termux / ARM servers |
+| `homectl-x.y.z.apk` | The Android app (Android 8+) |
+| `homectl-linux-x86_64` | The daemon: a static binary that runs on any x86-64 Linux |
+| `homectl-send-android-arm64` | Tiny file uploader for Termux / ARM |
 | `SHA256SUMS` | Checksums |
+
+The APK is signed with APK Signature Scheme v2+v3; the certificate fingerprints are in [docs/SIGNING.md](docs/SIGNING.md).
+Check yours with `apksigner verify --print-certs homectl-x.y.z.apk`. Android may warn about an app from outside the Play Store;
+that page also explains what that warning means and how to deal with it.
 
 ## Quick start
 
 **1. On each computer you want to control**
 ```sh
 chmod +x homectl-linux-x86_64
-./homectl-linux-x86_64          # listens on port 7878
+./homectl-linux-x86_64          # listens on port 7878 (HTTP and HTTPS on the same port)
 ```
-It uses `brightnessctl`, `wpctl`/`pactl`, `nmcli`, `bluetoothctl`, `ddcutil`, `wl-clipboard`, `loginctl` when present; features whose tool is missing just don't appear.
+It uses `brightnessctl`, `wpctl`/`pactl`, `nmcli`, `bluetoothctl`, `ddcutil`, `wl-clipboard`, `loginctl`, `doas` when present; a feature whose tool is missing simply doesn't appear.
 
-**2. Install the app** — open the `.apk` on the phone (allow "install unknown apps" once). If Android refuses to update an older install, uninstall it first.
+**2. Install the app** — open the `.apk` on the phone (allow "install unknown apps" once).
 
-**3. Pair** — open the app. It scans your Wi-Fi and Tailscale network and lists the machines it finds. Tap **Pair**; a 6-digit code appears on the machine (a desktop notification, or run `./homectl-linux-x86_64 pair` on a server). Type it in. That's it — repeat for each machine.
-Alternatives: `homectl pair` also prints a `homectl://pair?…` link and a QR code you can open on the phone, or enter an address and token by hand.
+**3. Pair** — the app lists machines it finds on your network; tap **Pair**, and a 6-digit code appears on the machine (a desktop notification, or run `./homectl-linux-x86_64 pair` on a server). Alternatively `homectl pair` prints a `homectl://pair?…` link and a QR code you can open on the phone. A pairing link contains the machine's secret token: treat it like a password.
 
-## Reaching it from anywhere
+**4. Open the app once on the home network after pairing.** That is when the phone registers its key with the machine (see below), learns the machine's tunnel and relays, and pins its certificate.
 
-The app remembers every address a machine reports and uses the best one that answers, so you never choose a mode: **Tailscale** → **home network** → **public tunnel**.
+## How the connection works
 
-- Tailscale / Wi-Fi: nothing to set up.
-- **No Tailscale:** turn on *Controls → Public tunnel* (or start the daemon with `HOMECTL_TUNNEL=quick`; needs `cloudflared`). It gets a `https://….trycloudflare.com` address. That address changes whenever the tunnel restarts; the app learns the new one the next time it connects by any route. If it changes while you're away with only the tunnel, pair again. For a permanent address use a Cloudflare *named* tunnel with your own domain.
+The app keeps every address a machine reports and tries them **all at once**, using the best answer:
 
-**Security — please read.** The token gives full control, **including a shell** (Terminal) and power-off. With the tunnel on, that's reachable from the internet, guarded only by the token (192 bits, plus a growing delay after wrong guesses). Pairing by code is refused over the tunnel and rate-limited, and each code allows 5 guesses. Keep the token private, leave the tunnel off unless needed, and set `HOMECTL_NO_TERMINAL=1` to disable the terminal on a machine. Traffic over Tailscale/LAN is plain HTTP inside that network.
+1. **LAN** — same Wi-Fi.
+2. **Tunnel** — an outbound Cloudflare *quick tunnel* the daemon opens (`HOMECTL_TUNNEL=quick`, needs `cloudflared` next to the binary or on `PATH`). No router settings; works behind carrier-grade NAT. The phone finds the tunnel's new address whenever it changes through a signed announcement on a private [ntfy](https://ntfy.sh) topic.
+3. **Through another machine** — an always-on machine with a tunnel relays to your others.
+4. **Tailscale / Headscale** — last fallback.
+
+Details, and what each third party can see: [docs/AWAY.md](docs/AWAY.md).
+
+### Security model in short
+
+- Every request needs the machine's **access token**.
+- LAN and Tailscale use **HTTPS with the certificate the phone pinned** when it paired (the daemon makes its own self-signed certificate; no CA, no account). Optionally refuse plain HTTP.
+- **Through the tunnel a request must also be signed by a registered phone**: each phone has a hardware-backed key that never leaves it, registered once on the home network, and every tunnel request carries a one-time signature. A leaked token alone is refused.
+- The app **locks behind your fingerprint, face or screen lock**, keeps tokens and your `doas` password in the Android Keystore, and can hide itself from screenshots.
+- Root actions (power modes, services, restart) use **your own `doas` password**, typed into a private terminal once and never stored or logged by the daemon.
+
+Environment switches: `HOMECTL_NO_TERMINAL=1`, `HOMECTL_NO_DELETE=1`, `HOMECTL_NO_EDIT=1`, `HOMECTL_TUNNEL=off`, `HOMECTL_NO_RENDEZVOUS=1`, `HOMECTL_ADDR=host:port`, `HOMECTL_DRYRUN=1` (power actions only log).
 
 ## Notes per machine type
-- **GPU:** Intel and AMD GPUs are read from sysfs. An NVIDIA dGPU is read with `nvidia-smi` **only while it is already awake and the laptop is on AC power** — asking a sleeping card wakes it and drains the battery. On battery the Monitor shows a "read it anyway" switch.
-- **Power / services** use `loginctl`, else `doas -n` (a passwordless doas rule for `poweroff`, `reboot` and `rc-service` is needed on hosts without logind, such as Alpine).
-- **Govee:** enable **LAN Control** for each light in the Govee app.
 
-## Screens and power modes
-- **Screens off/on** (Controls tab): the built-in panel by backlight, external monitors by DDC/CI power mode (`ddcutil setvcp d6`) — DPMS makes some monitors cycle test patterns instead of sleeping — and optionally also the compositor output (niri) so the GPU can stop driving a dark screen and sleep. Needs `ddcutil` (and `brightnessctl` for the panel).
-- **Power modes** (System tab): your own on/off script pairs. A pair named `<name>-on.sh` + `<name>-off.sh` in your home, `~/.local/bin` or `/usr/local/bin` shows up automatically; more (with a state check and a warning text) go in `~/.config/homectl/actions.json` — see `docs/actions.example.json`. They run through `doas -n`, so each script needs a passwordless rule; when it's missing the app shows the exact line to add, for example
-  ```
-  permit nopass YOU cmd /usr/local/bin/battery-powersave-on.sh        # executable script
-  permit nopass YOU cmd sh args /home/YOU/idle-on.sh                  # run via sh
-  ```
-  (one rule for the `-on` and one for the `-off` script). The daemon never edits `/etc/doas.conf`.
+- **GPU:** Intel and AMD are read from sysfs. An NVIDIA dGPU is read with `nvidia-smi` **only while it is already awake and the laptop is on AC power** — asking a sleeping card wakes it. CPU package power needs read access to `/sys/class/powercap/intel-rapl:*/energy_uj` (the app offers to allow it).
+- **Power / services** use `loginctl`, else `doas`. Without a `permit nopass` rule the app asks for your doas password instead.
+- **Govee:** enable **LAN Control** for each light in the Govee app.
+- **Clipboard** uses `wl-clipboard`; Noctalia's history is read from `~/.local/state/noctalia/clipboard` if it exists.
+
+## Power modes and screens
+
+- **Screens off/on:** the built-in panel by backlight, external monitors by DDC/CI power mode (`ddcutil setvcp d6`), and optionally the compositor output (niri).
+- **Power modes:** a pair `<name>-on.sh` + `<name>-off.sh` in your home, `~/.local/bin` or `/usr/local/bin` shows up automatically; more (with a state check and warning text) go in `~/.config/homectl/actions.json` — see `docs/actions.example.json`. They run through `doas`; the app shows the exact `permit nopass` line to add or asks for your password.
 
 ## Run at boot (OpenRC)
 ```sh
-doas sh packaging/install-service.sh [USER] [PATH-TO-homectl]     # as root; defaults to you and ~/homectl/homectl
+doas sh packaging/install-service.sh [USER] [PATH-TO-homectl]
 ```
-Installs `/etc/init.d/homectl` (supervised: restarts itself if it crashes), adds it to the default runlevel and starts it. Settings are in `/etc/conf.d/homectl`; for the public tunnel add `export HOMECTL_TUNNEL=quick` there. Updating later needs no root: replace the binary and `kill` the running one, the supervisor starts the new one. Service control from the app goes through `doas -n`, so it needs a passwordless rule on hosts without logind (e.g. Alpine).
+Installs a supervised service that restarts itself and (by default) starts the public tunnel — set `HOMECTL_TUNNEL=off` in `/etc/conf.d/homectl` to disable. Updating later needs no root: replace the binary and `kill` the running one.
 
 ## API
-All routes need `Authorization: Bearer <token>` except `/api/ping` and pairing. JSON in and out.
+
+All routes need `Authorization: Bearer <token>` except `/api/ping` and pairing; through the tunnel they also need the device signature. JSON in and out. A selection:
 
 | Route | |
 |---|---|
-| `GET /api/monitor[?gpu=1]` | full snapshot (CPU, per-core temps, GPUs, fans, network, disks…) + 2-minute history |
-| `GET /api/procs?sort=&order=&q=&limit=` | the process table (sort by pid/name/user/cpu/mem) |
-| `GET /api/fs/list?path=`, `GET /api/fs/download?path=` (Range ok), `POST /api/fs/upload?dir=&name=`, `POST /api/fs/mkdir` | file browser |
-| `GET /api/term/sessions`, `DELETE …/{id}`, `POST …/{id}/name` | persistent terminal sessions |
-| `GET /api/endpoints`, `GET/POST /api/tunnel` | reachable addresses; public tunnel on/off |
-| `GET /api/mixer`, `POST /api/mixer/{stream,recording,sink,source}/{id}` | per-app and per-device audio (`percent`, `muted`, `default`) |
-| `GET /api/radios`, `GET/POST /api/wifi…`, `/api/bluetooth…` | radios and Bluetooth devices |
-| `GET/POST /api/brightness`, `/api/monitors/{n}/brightness`, `/api/webcam/{n}` | displays, webcam |
-| `GET /api/lights[?rescan=1]`, `POST /api/lights/{ip}` | Govee state and control |
-| `POST /api/power/{lock,suspend,reboot,poweroff}`, `POST /api/procs/{pid}/{term,kill,stop,cont}` | |
-| `GET /api/services`, `POST /api/services/{name}/{start,stop,restart}` | |
-| `GET /api/displays`, `POST /api/displays/{internal,N,all}/{on,off}[?compositor=0]` | screens off/on |
-| `GET /api/actions`, `POST /api/actions/{id}/{on,off}` | power modes (your scripts) |
-| `GET/POST /api/clipboard`, `POST /api/files/{name}` | clipboard; upload to `~/homectl-inbox/` |
-| `GET /api/term?t=<token>&s=<session>` (WebSocket) | attach to a session (created on first use); replays recent output; binary = bytes, text = `{"resize":[cols,rows]}` |
-| `POST /api/pair/request`, `POST /api/pair/confirm` | code pairing (LAN/tailnet only) |
+| `GET /api/monitor[?since=&cores=1]` | full snapshot, history (only newer samples with `since`) |
+| `GET /api/glance` | three numbers per machine, cheap |
+| `GET /api/fs/{list,search,usage,stat,hash,download,thumb}`, `POST /api/fs/{upload,mkdir,rename,write,delete}` | files |
+| `GET /api/term` (WebSocket), `GET /api/term/sessions` | persistent terminal sessions |
+| `GET/POST /api/clipboard`, `/api/clipboard/{image,state,history,noctalia}` | clipboard |
+| `GET/POST /api/devices`, `GET/POST /api/security` | registered phones; security switches (home network only) |
+| `GET/POST/DELETE /api/peers`, `/peer/{id}/…` | relay to other machines |
+| `GET /api/endpoints`, `GET/POST /api/tunnel` | addresses, tunnel on/off |
+| `GET /api/mixer`, `/api/radios`, `/api/wifi`, `/api/bluetooth`, `/api/lights`, `/api/displays`, `/api/actions`, `/api/services`, `/api/procs` … | controls |
+| `POST /api/priv/{test,rapl}` | root helper (uses `X-Homectl-Pass`) |
 
 ## Build from source
+
 ```sh
-cargo build --release                              # daemon (needs a C compiler)
-packaging/build-static.sh                          # portable static musl build (zig + official rustc)
-(cd zig && zig build -Doptimize=ReleaseSmall)      # homectl-send
-(cd android && gradle :app:assembleRelease)        # app: Android SDK platform 34 + build-tools 34
+cargo build --release && cargo test --release       # daemon (needs a C compiler)
+packaging/build-static.sh                           # portable static musl build (zig + official rustc)
+(cd zig && zig build -Doptimize=ReleaseSmall)       # homectl-send
+(cd android && ./gradlew :app:assembleRelease)      # app: JDK 17, Android SDK platform 34 + build-tools 34.0.0
 ```
-The app is signed with `~/.config/homectl/debug.keystore` (override with `HOMECTL_KEYSTORE`). Create one with `keytool -genkeypair -keystore ~/.config/homectl/debug.keystore -alias homectl -keyalg RSA -keysize 2048 -validity 10000` (password `android`).
+Without a keystore the app is signed with the Android debug key. To use your own set `HOMECTL_KEYSTORE` (and `HOMECTL_KEYSTORE_PASS`, `HOMECTL_KEY_ALIAS`, `HOMECTL_KEY_PASS`). See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Layout
-`src/` Rust daemon · `csrc/` C shims (V4L2 webcam, PTY) · `zig/` uploader · `android/` Kotlin + Compose app · `web/` tiny built-in web page · `packaging/` init script, static-build script
 
-License: GPL-2.0-or-later
+`src/` Rust daemon · `csrc/` C shims (V4L2 webcam, PTY) · `zig/` uploader · `android/` Kotlin + Compose app · `web/` tiny built-in page · `packaging/` init script, static-build and release-signing scripts · `docs/` away-from-home design, signing notes, screenshots
+
+## Licence
+
+GPL-2.0-or-later, see [LICENSE](LICENSE). Bundled third-party code (xterm.js, Symbols Nerd Font, dependencies): [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

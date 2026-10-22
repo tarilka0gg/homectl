@@ -32,6 +32,8 @@ fun SystemScreen(onAddMachine: () -> Unit) {
     var confirm by remember { mutableStateOf<Pair<String, String>?>(null) }
 
     Section("Settings") {
+        val appVersion = remember { runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrDefault("?") }
+        Text("homectl app $appVersion" + (m?.daemonVersion?.takeIf { it.isNotBlank() }?.let { " · daemon on ${m.name} $it" } ?: ""), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text("Update speed", style = MaterialTheme.typography.titleSmall)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf(500 to "Fast 0.5 s", 1000 to "Normal 1 s", 2000 to "Relaxed 2 s", 5000 to "Slow 5 s").forEach { (ms, label) ->

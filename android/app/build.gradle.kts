@@ -11,8 +11,8 @@ android {
         applicationId = "dev.tarilka0gg.homectl"
         minSdk = 26
         targetSdk = 34
-        versionCode = 24
-        versionName = "0.17.0"
+        versionCode = 25
+        versionName = "0.17.1"
     }
     buildFeatures { compose = true }
     compileOptions {
@@ -20,12 +20,18 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    signingConfigs {
-        create("homectl") {
-            storeFile = file(System.getenv("HOMECTL_KEYSTORE") ?: "${System.getProperty("user.home")}/.config/homectl/debug.keystore")
-            storePassword = "android"
-            keyAlias = "homectl"
-            keyPassword = "android"
+    // Releases are signed with a key you provide: HOMECTL_KEYSTORE=/path/to.jks (+ HOMECTL_KEYSTORE_PASS, HOMECTL_KEY_ALIAS,
+    // HOMECTL_KEY_PASS). Without it the build is signed with the standard Android debug key, which is enough to install and test.
+    // (The official releases are re-signed afterwards with packaging/sign-release.sh.)
+    val keystore = System.getenv("HOMECTL_KEYSTORE")
+    if (keystore != null) {
+        signingConfigs {
+            create("homectl") {
+                storeFile = file(keystore)
+                storePassword = System.getenv("HOMECTL_KEYSTORE_PASS") ?: "android"
+                keyAlias = System.getenv("HOMECTL_KEY_ALIAS") ?: "homectl"
+                keyPassword = System.getenv("HOMECTL_KEY_PASS") ?: System.getenv("HOMECTL_KEYSTORE_PASS") ?: "android"
+            }
         }
     }
     buildTypes {
@@ -33,7 +39,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
-            signingConfig = signingConfigs.getByName("homectl")
+            signingConfig = signingConfigs.findByName("homectl") ?: signingConfigs.getByName("debug")
         }
     }
 }

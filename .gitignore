@@ -1,11 +1,25 @@
+# build output
 target/
 zig/.zig-cache/
 zig/zig-out/
+android/.gradle/
 android/build/
-android/.gradle/
-
-dist/*.apk
-android/.gradle/
-android/local.properties
 android/app/build/
-android/build/
+android/local.properties
+*.apk
+*.aab
+*.idsig
+dist/
+
+# never commit keys, tokens or pairing links
+*.keystore
+*.jks
+*.p12
+*.pem
+*.lineage
+release.pass
+*.passphrase*
+pair-*.txt
+.env
+.idea/
+*.iml

@@ -38,6 +38,8 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
     var rv by mutableStateOf(rv)
     /** SHA-256 of this machine's certificate, pinned at pairing: connections to it are encrypted and checked against it. */
     var fp by mutableStateOf(fp)
+    /** The daemon's version as last reported (empty for older daemons). */
+    var daemonVersion by mutableStateOf("")
     /** True when the machine presented a different certificate than the pinned one. */
     var certProblem by mutableStateOf(false)
     var name by mutableStateOf(name)
@@ -227,6 +229,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         val j = raw(via, "GET", "/api/endpoints")?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return
         j.optString("fp").ifBlank { null }?.let { found -> if (fp == null) { fp = found; Hc.save() } } // first contact: pin it
         j.optString("rv").ifBlank { null }?.let { found -> if (rv != found) { rv = found; Hc.save() } }
+        daemonVersion = j.optString("version")
         val a = j.optJSONArray("urls") ?: return
         val fresh = (0 until a.length()).map { a.getJSONObject(it).let { o -> Endpoint(o.getString("kind"), o.getString("url"), o.optString("token").ifBlank { null }, o.optString("hub").ifBlank { null }) } }
         if (fresh.isNotEmpty()) {

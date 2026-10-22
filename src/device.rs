@@ -24,6 +24,8 @@ pub struct Device {
 
 pub struct Devices {
     file: PathBuf,
+    #[cfg(test)]
+    scratch: bool,
     list: RwLock<Vec<Device>>,
     seen: Mutex<HashMap<String, u64>>,
 }
@@ -113,7 +115,7 @@ impl Devices {
     pub fn load(dir: PathBuf) -> Self {
         let file = dir.join("devices.json");
         let list = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-        Devices { file, list: RwLock::new(list), seen: Mutex::new(HashMap::new()) }
+        Devices { file, #[cfg(test)] scratch: false, list: RwLock::new(list), seen: Mutex::new(HashMap::new()) }
     }
 
     fn save(&self, l: &[Device]) {
@@ -173,5 +175,153 @@ impl Devices {
             return Err("replayed request");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ring::{rand::SystemRandom, signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_ASN1_SIGNING}};
+
+    fn b64(b: &[u8]) -> String {
+        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut s = String::new();
+        for c in b.chunks(3) {
+            let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+            for i in 0..=c.len() {
+                s.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
+            }
+        }
+        s
+    }
+
+    struct Phone {
+        key: EcdsaKeyPair,
+        spki_b64: String,
+    }
+
+    fn phone() -> Phone {
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
+        let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng).unwrap();
+        let mut spki = SPKI_P256_PREFIX.to_vec();
+        spki.extend_from_slice(key.public_key().as_ref());
+        Phone { key, spki_b64: b64(&spki) }
+    }
+
+    fn sign(p: &Phone, id: &str, method: &str, pq: &str, ts: u64, nonce: &str) -> Sig {
+        let sig = p.key.sign(&SystemRandom::new(), format!("{method}\n{pq}\n{ts}\n{nonce}").as_bytes()).unwrap();
+        Sig { dev: id.into(), ts, nonce: nonce.into(), sig: b64(sig.as_ref()) }
+    }
+
+    /// A registry in its own scratch folder. Tests run in parallel inside one process, so the folder name needs a counter —
+    /// the process id and the clock alone can collide, and two tests would then share one `devices.json`.
+    fn devices() -> Devices {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("homectl-test-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut d = Devices::load(dir);
+        d.scratch = true;
+        d
+    }
+
+    #[test]
+    fn base64_accepts_both_alphabets_and_padding() {
+        assert_eq!(b64decode("c2VjcmV0").unwrap(), b"secret");
+        assert_eq!(b64decode("c2VjcmV0IQ==").unwrap(), b"secret!");
+        assert_eq!(b64decode("c2VjcmV0IQ").unwrap(), b"secret!");
+        assert_eq!(b64decode("-_-_").unwrap(), b64decode("+/+/").unwrap());
+        assert!(b64decode("not base64!").is_none());
+    }
+
+    #[test]
+    fn only_p256_public_keys_are_enrolled() {
+        let d = devices();
+        assert!(d.enrol("x", "AAAA").is_err());
+        assert!(d.enrol("x", "###").is_err());
+        let p = phone();
+        let (id, fp) = d.enrol("my phone", &p.spki_b64).unwrap();
+        assert_eq!(id, &fp[..16]);
+        assert_eq!(d.count(), 1);
+        d.enrol("renamed", &p.spki_b64).unwrap(); // same key: replaced, not duplicated
+        assert_eq!(d.count(), 1);
+    }
+
+    #[test]
+    fn a_valid_signature_is_accepted_exactly_once() {
+        let (d, p) = (devices(), phone());
+        let (id, _) = d.enrol("p", &p.spki_b64).unwrap();
+        let s = sign(&p, &id, "GET", "/api/monitor", now_ms(), "n1");
+        assert_eq!(d.verify("GET", "/api/monitor", &s), Ok(()));
+        assert_eq!(d.verify("GET", "/api/monitor", &s), Err("replayed request"));
+    }
+
+    #[test]
+    fn a_signature_is_bound_to_method_path_and_query() {
+        let (d, p) = (devices(), phone());
+        let (id, _) = d.enrol("p", &p.spki_b64).unwrap();
+        let s = sign(&p, &id, "GET", "/api/fs/list?path=/home", now_ms(), "n2");
+        assert_eq!(d.verify("GET", "/api/fs/list?path=/etc", &s), Err("bad signature"));
+        assert_eq!(d.verify("POST", "/api/fs/list?path=/home", &s), Err("bad signature"));
+        assert_eq!(d.verify("GET", "/api/fs/list?path=/home", &s), Ok(())); // the genuine request still works
+    }
+
+    #[test]
+    fn stale_future_forged_and_unknown_are_refused() {
+        let (d, p) = (devices(), phone());
+        let (id, _) = d.enrol("p", &p.spki_b64).unwrap();
+        let old = sign(&p, &id, "GET", "/a", now_ms() - 600_000, "n3");
+        assert_eq!(d.verify("GET", "/a", &old), Err("clock too far off"));
+        let future = sign(&p, &id, "GET", "/a", now_ms() + 600_000, "n4");
+        assert_eq!(d.verify("GET", "/a", &future), Err("clock too far off"));
+        let other = phone(); // a key that was never enrolled, claiming to be the enrolled phone
+        let forged = sign(&other, &id, "GET", "/a", now_ms(), "n5");
+        assert_eq!(d.verify("GET", "/a", &forged), Err("bad signature"));
+        let stranger = sign(&p, "0000000000000000", "GET", "/a", now_ms(), "n6");
+        assert_eq!(d.verify("GET", "/a", &stranger), Err("unknown device"));
+        let mut tampered = sign(&p, &id, "GET", "/a", now_ms(), "n7");
+        tampered.nonce = "n8".into();
+        assert_eq!(d.verify("GET", "/a", &tampered), Err("bad signature"));
+    }
+
+    #[test]
+    fn a_removed_phone_is_refused_at_once() {
+        let (d, p) = (devices(), phone());
+        let (id, _) = d.enrol("p", &p.spki_b64).unwrap();
+        assert!(d.remove(&id));
+        assert!(!d.remove(&id));
+        assert_eq!(d.verify("GET", "/a", &sign(&p, &id, "GET", "/a", now_ms(), "n9")), Err("unknown device"));
+    }
+
+    #[test]
+    fn websocket_signature_parameters_are_split_off_the_query() {
+        let (q, s) = split_query("t=TOKEN&s=main&cols=80&dev=abc&ts=12&n=xyz&sig=SIG&rows=24");
+        assert_eq!(q, "t=TOKEN&s=main&cols=80&rows=24");
+        let s = s.unwrap();
+        assert_eq!((s.dev.as_str(), s.ts, s.nonce.as_str(), s.sig.as_str()), ("abc", 12, "xyz", "SIG"));
+        assert!(split_query("t=TOKEN&dev=abc&ts=12").1.is_none()); // incomplete: not a signature
+    }
+
+    #[test]
+    fn tunnel_and_hub_requests_are_recognised_from_their_headers() {
+        let mut h = HeaderMap::new();
+        assert!(!via_tunnel(&h) && !via_hub(&h));
+        h.insert("cf-connecting-ip", "1.2.3.4".parse().unwrap());
+        assert!(via_tunnel(&h));
+        let mut h = HeaderMap::new();
+        h.insert("x-homectl-via", "hub".parse().unwrap());
+        assert!(via_hub(&h) && !via_tunnel(&h));
+    }
+
+    impl Drop for Devices {
+        fn drop(&mut self) {
+            if self.scratch {
+                if let Some(dir) = self.file.parent() {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+            }
+        }
     }
 }

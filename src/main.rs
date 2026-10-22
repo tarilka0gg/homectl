@@ -838,7 +838,7 @@ async fn main() {
     let router = open.nest("/api", api);
     clip::start();
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
-    eprintln!("homectl listening on {addr} ({})", if tls.is_some() { "plain and encrypted" } else { "plain only" });
+    eprintln!("homectl {} listening on {addr} ({})", env!("CARGO_PKG_VERSION"), if tls.is_some() { "plain and encrypted" } else { "plain only" });
     let acceptor = tls.map(|t| t.acceptor);
     loop {
         let (tcp, peer) = match listener.accept().await {
