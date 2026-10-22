@@ -16,7 +16,9 @@ eval exec zig cc -target x86_64-linux-musl -mcpu=x86_64 $args
 EOF
 chmod +x "$ZIGCC"
 export CC_x86_64_unknown_linux_musl="$ZIGCC" CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$ZIGCC"
-export CARGO_ENCODED_RUSTFLAGS="$(printf -- '-Clink-self-contained=no\037-Ctarget-cpu=x86-64')"
+# the home directory, the cargo registry and the checkout location must not end up inside the binary (panic messages carry source paths)
+CH=${CARGO_HOME:-$HOME/.cargo}
+export CARGO_ENCODED_RUSTFLAGS="$(printf -- '-Clink-self-contained=no\037-Ctarget-cpu=x86-64\037--remap-path-prefix=%s=/cargo\037--remap-path-prefix=%s=/home/user\037--remap-path-prefix=%s=/src' "$CH" "$HOME" "$(pwd)")"
 cargo build --release --target x86_64-unknown-linux-musl
 rm -f "$ZIGCC"
 echo "built target/x86_64-unknown-linux-musl/release/homectl"
