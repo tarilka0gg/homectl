@@ -412,6 +412,16 @@ async fn clip_get() -> impl IntoResponse {
     Json(json!({ "text": ctl::clipboard_get().await, "type": "text" }))
 }
 
+/// The phone sends an image (raw bytes, `?mime=image/png`) to become the machine's clipboard.
+async fn clip_image_set(Query(q): Query<std::collections::HashMap<String, String>>, body: axum::body::Bytes) -> StatusCode {
+    clip::touch();
+    let mime = q.get("mime").map(String::as_str).unwrap_or("image/png");
+    if !mime.starts_with("image/") || body.is_empty() || body.len() > 32 << 20 {
+        return StatusCode::BAD_REQUEST;
+    }
+    status(ctl::clipboard_set_bytes(mime, &body).await)
+}
+
 async fn clip_image() -> Response {
     let types = ctl::clipboard_types().await;
     let Some(mime) = types.iter().find(|t| t.starts_with("image/")).cloned() else { return StatusCode::NOT_FOUND.into_response() };
@@ -684,7 +694,7 @@ async fn main() {
         .route("/monitors", get(monitors_get))
         .route("/monitors/{d}/brightness", get(monitor_get).post(monitor_post))
         .route("/clipboard", get(clip_get).post(clip_post))
-        .route("/clipboard/image", get(clip_image))
+        .route("/clipboard/image", get(clip_image).post(clip_image_set))
         .route("/clipboard/noctalia", get(clip_noctalia))
         .route("/clipboard/noctalia/{id}/use", post(clip_noctalia_use))
         .route("/clipboard/state", get(clip_state))

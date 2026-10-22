@@ -187,115 +187,57 @@ fun SystemScreen(onAddMachine: () -> Unit) {
         } ?: Text("Loading…")
     }
 
-    // ---- clipboard: phone <-> machine, with a visible result for every action ----
-    var clip by remember { mutableStateOf("") }
-    var machineClip by remember { mutableStateOf<String?>(null) }
-    var machineImage by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
-    var machineImageBytes by remember { mutableStateOf<ByteArray?>(null) }
-    var machineClipType by remember { mutableStateOf("text") }
+    // ---- clipboard: one card, two pickers ----
     var clipNote by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
-    var busy by remember { mutableStateOf(false) }
-    fun phoneClip(): String = (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(ctx)?.toString().orEmpty()
-    fun say(ok: Boolean, text: String) { clipNote = ok to text; Toast.makeText(ctx, (if (ok) "✓ " else "✗ ") + text, Toast.LENGTH_SHORT).show() }
-    fun chars(t: String) = "${t.length} character${if (t.length == 1) "" else "s"}"
-    suspend fun sendText(t: String) {
-        if (t.isBlank()) return say(false, "Nothing to send — the text is empty")
-        busy = true
-        val ok = Hc.post("/api/clipboard", body("text" to t))
-        busy = false
-        say(ok, if (ok) "Sent ${chars(t)} to ${m?.name ?: "the machine"}'s clipboard" else "Couldn't send — is ${m?.name ?: "the machine"} reachable?")
-    }
+    var gotImage by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    var gotFile by remember { mutableStateOf<java.io.File?>(null) }
     var sendPicker by remember { mutableStateOf(false) }
     var getPicker by remember { mutableStateOf(false) }
-    if (sendPicker) SendPicker(m?.name ?: "machine", onPick = { t -> clip = t; scope.launch { sendText(t); PhoneClips.add(t, "sent") } }, onClose = { sendPicker = false })
-    if (getPicker && m != null) GetPicker(m, onPick = { t ->
-        machineClip = t; machineClipType = "text"; machineImage = null
-        PhoneClips.write(ctx, t); PhoneClips.add(t, "from ${m.name}")
-        say(true, "Copied ${chars(t)} from ${m.name} to the phone's clipboard")
-    }, onClose = { getPicker = false }, onNote = { ok, text -> say(ok, text) })
+    fun say(ok: Boolean, text: String) { clipNote = ok to text; Toast.makeText(ctx, (if (ok) "✓ " else "✗ ") + text, Toast.LENGTH_SHORT).show() }
+    if (sendPicker && m != null) SendPicker(m, onResult = { ok, text -> say(ok, text) }, onClose = { sendPicker = false })
+    if (getPicker && m != null) GetPicker(
+        m,
+        onGotText = { t ->
+            gotImage = null; gotFile = null
+            PhoneClips.writeText(ctx, t); PhoneClips.addText(t, "from ${m.name}")
+            say(true, "Copied ${t.length} characters from ${m.name} to the phone's clipboard")
+        },
+        onGotImage = { f, mime ->
+            PhoneClips.writeImage(ctx, f)
+            PhoneClips.add(PhoneClip(null, f, mime, System.currentTimeMillis(), "from ${m.name}"))
+            gotFile = f
+            gotImage = android.graphics.BitmapFactory.decodeFile(f.path)?.asImageBitmap()
+            say(true, "Copied the picture from ${m.name} to the phone's clipboard (${fmtBytes(f.length().toDouble())})")
+        },
+        onClose = { getPicker = false }, onNote = { ok, text -> say(ok, text) },
+    )
     Section("Clipboard") {
         if (m != null) {
             val common = ClipSync.isOn(m.id)
-            SwitchRow("Common clipboard with ${m.name}", common, ClipSync.note?.takeIf { common } ?: "copy on one, paste on the other — works while homectl is open") { on ->
+            SwitchRow("Common clipboard with ${m.name}", common, ClipSync.note?.takeIf { common } ?: "copy text or a picture on one, paste on the other — works while homectl is open") { on ->
                 ClipSync.set(m.id, on)
                 say(true, if (on) "Common clipboard on — only new copies are shared" else "Common clipboard off")
             }
             HorizontalDivider()
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilledTonalButton({ sendPicker = true }) { Text("Choose what to send…") }
-            FilledTonalButton({ getPicker = true }, enabled = m != null) { Text("Choose what to get…") }
+            Button({ sendPicker = true }, enabled = m != null) { Text("Send to ${m?.name ?: "machine"}…") }
+            FilledTonalButton({ getPicker = true }, enabled = m != null) { Text("Get from ${m?.name ?: "machine"}…") }
         }
-        Text("Phone → ${m?.name ?: "machine"}", style = MaterialTheme.typography.titleSmall)
-        OutlinedTextField(clip, { clip = it }, Modifier.fillMaxWidth(), label = { Text("Text to send") }, minLines = 2, maxLines = 6)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        clipNote?.let { (ok, t) -> Text((if (ok) "✓ " else "✗ ") + t, style = MaterialTheme.typography.bodySmall, color = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error) }
+        gotImage?.let { img ->
+            androidx.compose.foundation.Image(img, "Picture from the machine", Modifier.fillMaxWidth().heightIn(max = 260.dp), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
             OutlinedButton({
-                val t = phoneClip()
-                if (t.isEmpty()) say(false, "The phone's clipboard is empty") else { clip = t; PhoneClips.add(t, "copied on phone"); say(true, "Pasted ${chars(t)} from the phone's clipboard") }
-            }) { Text("Paste from phone") }
-            FilledTonalButton({ scope.launch { sendText(clip) } }, enabled = !busy) { Text("Send text") }
-            Button({
-                val t = phoneClip()
-                if (t.isEmpty()) say(false, "The phone's clipboard is empty") else { clip = t; scope.launch { sendText(t) } }
-            }, enabled = !busy) { Text("Send phone clipboard") }
-        }
-        HorizontalDivider()
-        Text("${m?.name ?: "Machine"} → phone", style = MaterialTheme.typography.titleSmall)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilledTonalButton({
-                scope.launch {
-                    busy = true
-                    val j = Hc.json("/api/clipboard")
-                    busy = false
-                    machineImage = null; machineImageBytes = null
-                    if (j == null) say(false, "Couldn't read the machine's clipboard")
-                    else {
-                        val type = j.optString("type", "text")
-                        machineClipType = type
-                        val t = j.str("text")
-                        machineClip = t
-                        when {
-                            type.startsWith("image/") -> {
-                                val bytes = Hc.cur?.bytes("/api/clipboard/image", 32_000_000)
-                                val bmp = bytes?.let { android.graphics.BitmapFactory.decodeByteArray(it, 0, it.size) }
-                                if (bmp != null) { machineImage = bmp.asImageBitmap(); machineImageBytes = bytes; say(true, "The machine's clipboard holds an image (${bmp.width}×${bmp.height}, ${fmtBytes(bytes.size.toDouble())})") }
-                                else say(false, "The machine's clipboard holds an image the phone can't show")
-                            }
-                            type == "empty" -> say(true, "The machine's clipboard is empty")
-                            type == "other" -> say(false, "The machine's clipboard holds something that isn't text or an image")
-                            else -> say(true, if (t.isEmpty()) "The machine's clipboard is empty" else "Got ${chars(t)} from the machine")
-                        }
-                    }
-                }
-            }, enabled = !busy) { Text("Get from machine") }
-            OutlinedButton({
-                val t = machineClip.orEmpty()
-                if (t.isEmpty()) say(false, "Get the machine's clipboard first")
-                else { (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("homectl", t)); say(true, "Copied ${chars(t)} to the phone's clipboard") }
-            }, enabled = machineClipType == "text" && !machineClip.isNullOrEmpty()) { Text("Copy to phone") }
-            OutlinedButton({ machineClip?.let { clip = it; say(true, "Moved it into the text box") } }, enabled = machineClipType == "text" && !machineClip.isNullOrEmpty()) { Text("Edit it") }
-        }
-        machineImage?.let { img ->
-            androidx.compose.foundation.Image(img, "Machine clipboard image", Modifier.fillMaxWidth().heightIn(max = 280.dp), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
-            OutlinedButton({
-                val bytes = machineImageBytes ?: return@OutlinedButton
+                val f = gotFile ?: return@OutlinedButton
                 val values = android.content.ContentValues().apply {
                     put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "clipboard-${System.currentTimeMillis()}.png")
-                    put(android.provider.MediaStore.Images.Media.MIME_TYPE, machineClipType)
+                    put(android.provider.MediaStore.Images.Media.MIME_TYPE, if (f.name.endsWith("jpg")) "image/jpeg" else "image/png")
                     put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/homectl")
                 }
                 val uri = ctx.contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-                if (uri != null) { ctx.contentResolver.openOutputStream(uri)?.use { it.write(bytes) }; say(true, "Saved the image to Pictures/homectl") } else say(false, "Couldn't save the image")
-            }) { Text("Save image to phone") }
+                if (uri != null) { ctx.contentResolver.openOutputStream(uri)?.use { it.write(f.readBytes()) }; say(true, "Saved the picture to Pictures/homectl") } else say(false, "Couldn't save the picture")
+            }) { Text("Save picture to the gallery") }
         }
-        if (machineImage == null) machineClip?.let { t ->
-            Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small) {
-                androidx.compose.foundation.text.selection.SelectionContainer {
-                    Text(if (t.isEmpty()) "(empty)" else t.take(2000) + if (t.length > 2000) "…" else "", Modifier.fillMaxWidth().padding(10.dp), style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, maxLines = 8)
-                }
-            }
-        }
-        clipNote?.let { (ok, t) -> Text((if (ok) "✓ " else "✗ ") + t, style = MaterialTheme.typography.bodySmall, color = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error) }
     }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->

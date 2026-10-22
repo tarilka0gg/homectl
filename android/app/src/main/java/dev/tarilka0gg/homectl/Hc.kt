@@ -195,6 +195,26 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         }
     }
 
+    /** POSTs raw bytes (an image for the clipboard); true on a 2xx answer. */
+    suspend fun postBytes(pathQuery: String, bytes: ByteArray, readTimeoutMs: Int = 60_000): Boolean {
+        val e = active ?: resolve() ?: return false
+        return withContext(Dispatchers.IO) {
+            try {
+                val c = Net.open(urlOf(e), "POST", pathQuery, e.token ?: token, 6000, pin = pinFor(e))
+                c.readTimeout = readTimeoutMs
+                c.doOutput = true
+                c.setFixedLengthStreamingMode(bytes.size)
+                c.setRequestProperty("Content-Type", "application/octet-stream")
+                c.outputStream.use { it.write(bytes) }
+                val ok = c.responseCode in 200..299
+                (if (ok) c.inputStream else c.errorStream)?.close()
+                ok
+            } catch (_: Exception) {
+                false
+            }
+        }
+    }
+
     suspend fun upload(ctx: Context, uri: Uri, fileName: String): Boolean {
         val e = active ?: resolve() ?: return false
         return withContext(Dispatchers.IO) {
