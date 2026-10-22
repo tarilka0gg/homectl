@@ -191,6 +191,21 @@ pub async fn clipboard_image(mime: &str) -> Option<Vec<u8>> {
     (out.status.success() && out.stdout.len() <= 32 << 20).then_some(out.stdout)
 }
 
+/// Puts raw bytes of a given type (e.g. a screenshot) on the clipboard.
+pub async fn clipboard_set_bytes(mime: &str, data: &[u8]) -> bool {
+    use tokio::io::AsyncWriteExt;
+    if !mime.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '+' | '-' | ';' | '=')) {
+        return false;
+    }
+    let Ok(mut child) = wayland_env(&mut Command::new("wl-copy")).args(["--type", mime]).stdin(std::process::Stdio::piped()).spawn() else { return false };
+    if let Some(mut si) = child.stdin.take() {
+        if si.write_all(data).await.is_err() {
+            return false;
+        }
+    }
+    child.wait().await.is_ok_and(|s| s.success())
+}
+
 pub async fn clipboard_set(text: &str) -> bool {
     use tokio::io::AsyncWriteExt;
     let Ok(mut child) = wayland_env(&mut Command::new("wl-copy")).stdin(std::process::Stdio::piped()).spawn() else {

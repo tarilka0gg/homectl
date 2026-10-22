@@ -137,3 +137,55 @@ pub fn clear() {
     s.list.clear();
     REV.fetch_add(1, Ordering::Relaxed);
 }
+
+// ---- Noctalia's own clipboard history (a persistent store the desktop shell keeps) ----
+
+fn noctalia_dir() -> std::path::PathBuf {
+    let state = std::env::var("XDG_STATE_HOME").ok().filter(|s| !s.is_empty()).map(std::path::PathBuf::from).unwrap_or_else(|| {
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".local/state")
+    });
+    state.join("noctalia/clipboard")
+}
+
+fn noctalia_index() -> Vec<Value> {
+    let Ok(t) = std::fs::read_to_string(noctalia_dir().join("index.json")) else { return vec![] };
+    let Ok(v) = serde_json::from_str::<Value>(&t) else { return vec![] };
+    v["entries"].as_array().cloned().unwrap_or_default()
+}
+
+/// Newest first. Each entry has a preview, size, time, kind (text/image) and the file holding the full content.
+pub fn noctalia_list() -> Value {
+    let dir = noctalia_dir();
+    let mut v: Vec<Value> = noctalia_index()
+        .into_iter()
+        .filter_map(|e| {
+            let id = e["id"].as_str()?.to_string();
+            let mime = e["data_mime_type"].as_str().unwrap_or("").to_string();
+            let path = e["payload_path"].as_str()?.to_string();
+            if !std::path::Path::new(&path).starts_with(&dir) {
+                return None; // only ever point at files inside Noctalia's own store
+            }
+            let kind = if mime.starts_with("image/") { "image" } else if mime.starts_with("text/") { "text" } else { "other" };
+            Some(json!({
+                "id": id, "kind": kind, "mime": mime, "size": e["byte_size"], "at": e["captured_at_ms"].as_u64().unwrap_or(0) / 1000,
+                "pinned": e["pinned"].as_bool().unwrap_or(false),
+                "preview": e["text_preview"].as_str().unwrap_or("").chars().take(300).collect::<String>(),
+                "path": path,
+            }))
+        })
+        .collect();
+    v.sort_by(|a, b| b["at"].as_u64().cmp(&a["at"].as_u64()));
+    json!(v)
+}
+
+/// The stored content of one Noctalia entry (id must be in its index), as (mime, bytes).
+pub fn noctalia_payload(id: &str) -> Option<(String, Vec<u8>)> {
+    let dir = noctalia_dir();
+    let e = noctalia_index().into_iter().find(|e| e["id"].as_str() == Some(id))?;
+    let path = std::path::PathBuf::from(e["payload_path"].as_str()?);
+    if !path.starts_with(&dir) || path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return None;
+    }
+    let bytes = std::fs::read(&path).ok()?;
+    (bytes.len() <= 32 << 20).then(|| (e["data_mime_type"].as_str().unwrap_or("text/plain").to_string(), bytes))
+}

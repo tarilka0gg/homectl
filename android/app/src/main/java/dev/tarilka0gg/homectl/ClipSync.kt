@@ -141,49 +141,97 @@ fun SendPicker(machine: String, onPick: (String) -> Unit, onClose: () -> Unit) {
     }
 }
 
-/** Choose which of the machine's recent clips to bring to the phone (or put back on the machine's clipboard). */
+/**
+ * Choose which clip to bring from the machine to the phone (or put back on the machine's own clipboard). Two lists:
+ * the machine's recent copies, and — if the desktop shell is Noctalia — everything in its clipboard history, text and images.
+ */
 @Composable
 fun GetPicker(m: Machine, onPick: (String) -> Unit, onClose: () -> Unit, onNote: (Boolean, String) -> Unit) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
     var nonce by remember { mutableIntStateOf(0) }
+    var tab by remember { mutableIntStateOf(0) }
+    var query by remember { mutableStateOf("") }
+    var viewing by remember { mutableStateOf<RemoteFile?>(null) }
     val hist = loaded(nonce, 0) { m.array("/api/clipboard/history") }
+    val noc = loaded(nonce, 0) { m.array("/api/clipboard/noctalia") }
     val scope = rememberCoroutineScope()
-    val list = hist.value?.objs().orEmpty()
+    val recent = hist.value?.objs().orEmpty()
+    val nocAll = noc.value?.objs().orEmpty()
+    val nocShown = remember(nocAll, query) {
+        val q = query.trim().lowercase()
+        if (q.isEmpty()) nocAll else nocAll.filter { it.str("kind") == "text" && it.str("preview").lowercase().contains(q) }
+    }
     ModalBottomSheet(onClose, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Get from ${m.name}", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-            if (list.isNotEmpty()) TextButton({ scope.launchIt { m.call("DELETE", "/api/clipboard/history"); nonce++ } }) { Text("Clear all") }
+            if (tab == 0 && recent.isNotEmpty()) TextButton({ scope.launchIt { m.call("DELETE", "/api/clipboard/history"); nonce++ } }) { Text("Clear all") }
         }
-        Text("Tap the one to copy to the phone. Kept in the machine's memory only, never written to disk.", Modifier.padding(horizontal = 20.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (hist.value == null) Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-        else if (list.isEmpty()) Text("Nothing copied on ${m.name} since it started watching. Copy something there and reopen this.", Modifier.padding(20.dp))
-        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp), contentPadding = PaddingValues(horizontal = 12.dp)) {
-            items(list.size) { i ->
-                val e = list[i]
-                val src = if (e.str("source") == "phone") "sent from the phone" else "copied on ${m.name}"
-                ClipRow(
-                    e.str("preview") + if (e.optInt("len") > 300) "…" else "",
-                    "$src · ${agoShort(e.optLong("at") * 1000)} · ${e.optInt("len")} characters" + if (e.optInt("lines") > 1) " · ${e.optInt("lines")} lines" else "",
-                    {
-                        scope.launchIt {
-                            val full = m.json("/api/clipboard/history/${e.optLong("id")}")?.str("text")
-                            if (full == null) onNote(false, "Couldn't read that entry") else { onPick(full); onClose() }
-                        }
-                    },
-                    onDelete = { scope.launchIt { m.call("DELETE", "/api/clipboard/history/${e.optLong("id")}"); nonce++ } },
-                    extra = "Use on ${m.name}" to { scope.launchIt { val ok = m.post("/api/clipboard/history/${e.optLong("id")}/use"); onNote(ok, if (ok) "Put it back on ${m.name}'s clipboard" else "Couldn't reach ${m.name}"); onClose() } },
-                )
+        Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(tab == 0, { tab = 0 }, label = { Text("Recent copies") })
+            if (noc.value == null || nocAll.isNotEmpty()) FilterChip(tab == 1, { tab = 1 }, label = { Text("Noctalia history" + if (nocAll.isNotEmpty()) " (${nocAll.size})" else "") })
+        }
+        if (tab == 0) {
+            Text("Tap the one to copy to the phone. Kept in the machine's memory only, never written to disk.", Modifier.padding(horizontal = 20.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (hist.value == null) Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+            else if (recent.isEmpty()) Text("Nothing copied on ${m.name} since it started watching. Copy something there and reopen this.", Modifier.padding(20.dp))
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp), contentPadding = PaddingValues(horizontal = 12.dp)) {
+                items(recent.size) { i ->
+                    val e = recent[i]
+                    val src = if (e.str("source") == "phone") "sent from the phone" else "copied on ${m.name}"
+                    ClipRow(
+                        e.str("preview") + if (e.optInt("len") > 300) "…" else "",
+                        "$src · ${agoShort(e.optLong("at") * 1000)} · ${e.optInt("len")} characters" + if (e.optInt("lines") > 1) " · ${e.optInt("lines")} lines" else "",
+                        {
+                            scope.launchIt {
+                                val full = m.json("/api/clipboard/history/${e.optLong("id")}")?.str("text")
+                                if (full == null) onNote(false, "Couldn't read that entry") else { onPick(full); onClose() }
+                            }
+                        },
+                        onDelete = { scope.launchIt { m.call("DELETE", "/api/clipboard/history/${e.optLong("id")}"); nonce++ } },
+                        extra = "Use on ${m.name}" to { scope.launchIt { val ok = m.post("/api/clipboard/history/${e.optLong("id")}/use"); onNote(ok, if (ok) "Put it back on ${m.name}'s clipboard" else "Couldn't reach ${m.name}"); onClose() } },
+                    )
+                }
+            }
+        } else {
+            OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth().padding(horizontal = 16.dp), singleLine = true, label = { Text("Search the text entries") })
+            Text("Scanned from Noctalia's clipboard panel on ${m.name}: ${nocAll.count { it.str("kind") == "text" }} texts, ${nocAll.count { it.str("kind") == "image" }} images. Tap to copy a text to the phone, or to open an image.", Modifier.padding(horizontal = 20.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (noc.value == null) Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+            else if (nocShown.isEmpty()) Text("Nothing matches.", Modifier.padding(20.dp))
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp), contentPadding = PaddingValues(horizontal = 12.dp)) {
+                items(nocShown.size, key = { nocShown[it].str("id") }) { i ->
+                    val e = nocShown[i]
+                    val isImage = e.str("kind") == "image"
+                    val file = RemoteFile(e.str("id") + ".png", e.str("path"), e.optLong("size"), e.optLong("at"))
+                    val sub = (if (e.optBoolean("pinned")) "📌 pinned · " else "") + agoShort(e.optLong("at") * 1000) + " · " + (if (isImage) "image " else "") + fmtBytes(e.optDouble("size"))
+                    ClipRow(
+                        if (isImage) "" else e.str("preview") + if (e.optLong("size") > 300) "…" else "",
+                        sub,
+                        {
+                            if (isImage) viewing = file
+                            else scope.launchIt {
+                                val bytes = m.bytes("/api/fs/download?path=" + android.net.Uri.encode(e.str("path")), 400_000)
+                                if (bytes == null) onNote(false, "Couldn't read that entry") else { onPick(String(bytes, Charsets.UTF_8)); onClose() }
+                            }
+                        },
+                        onDelete = null,
+                        extra = "Use on ${m.name}" to { scope.launchIt { val ok = m.post("/api/clipboard/noctalia/${android.net.Uri.encode(e.str("id"))}/use"); onNote(ok, if (ok) "Put it on ${m.name}'s clipboard" else "Couldn't reach ${m.name}"); onClose() } },
+                        thumb = if (isImage) ({ Thumb(m, file, 72) }) else null,
+                    )
+                }
             }
         }
         Spacer(Modifier.height(24.dp))
     }
+    viewing?.let { f -> PreviewDialog(m, listOf(f), 0) { viewing = null } }
 }
 
 private fun kotlinx.coroutines.CoroutineScope.launchIt(block: suspend () -> Unit) { this.launch { block() } }
 
 @Composable
-private fun ClipRow(text: String, sub: String, onClick: () -> Unit, onDelete: (() -> Unit)?, extra: Pair<String, () -> Unit>? = null) {
+private fun ClipRow(text: String, sub: String, onClick: () -> Unit, onDelete: (() -> Unit)?, extra: Pair<String, () -> Unit>? = null, thumb: (@Composable () -> Unit)? = null) {
     Column(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text(text, maxLines = 3, overflow = TextOverflow.Ellipsis, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
+        thumb?.invoke()
+        if (text.isNotEmpty()) Text(text, maxLines = 3, overflow = TextOverflow.Ellipsis, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(sub, Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             extra?.let { (label, act) -> TextButton(act, contentPadding = PaddingValues(horizontal = 8.dp)) { Text(label, style = MaterialTheme.typography.labelMedium) } }

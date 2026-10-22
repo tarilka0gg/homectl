@@ -435,6 +435,28 @@ async fn clip_post(Json(t): Json<Text>) -> StatusCode {
     status(ok)
 }
 
+/// What Noctalia's clipboard panel holds (empty list if it isn't installed or the clipboard is disabled there).
+async fn clip_noctalia() -> impl IntoResponse {
+    clip::touch();
+    Json(clip::noctalia_list())
+}
+
+/// Puts a Noctalia history entry (text or image) back on the machine's clipboard.
+async fn clip_noctalia_use(Path(id): Path<String>) -> StatusCode {
+    let Some((mime, bytes)) = clip::noctalia_payload(&id) else { return StatusCode::NOT_FOUND };
+    let ok = if mime.starts_with("text/") {
+        let t = String::from_utf8_lossy(&bytes).into_owned();
+        let ok = ctl::clipboard_set(&t).await;
+        if ok {
+            clip::sent_by_phone(&t);
+        }
+        ok
+    } else {
+        ctl::clipboard_set_bytes(&mime, &bytes).await
+    };
+    status(ok)
+}
+
 async fn clip_state() -> impl IntoResponse {
     Json(clip::state())
 }
@@ -663,6 +685,8 @@ async fn main() {
         .route("/monitors/{d}/brightness", get(monitor_get).post(monitor_post))
         .route("/clipboard", get(clip_get).post(clip_post))
         .route("/clipboard/image", get(clip_image))
+        .route("/clipboard/noctalia", get(clip_noctalia))
+        .route("/clipboard/noctalia/{id}/use", post(clip_noctalia_use))
         .route("/clipboard/state", get(clip_state))
         .route("/clipboard/history", get(clip_history).delete(clip_history_clear))
         .route("/clipboard/history/{id}", get(clip_item).delete(clip_item_forget))
