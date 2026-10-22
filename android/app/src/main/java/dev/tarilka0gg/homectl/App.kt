@@ -56,8 +56,7 @@ fun App() {
     val m = Hc.cur!!
     val ctxApp = LocalContext.current
     LaunchedEffect(Unit) { PhoneClips.listen(ctxApp) }
-    val common = ClipSync.isOn(m.id)
-    LaunchedEffect(m.id, common) { if (common) ClipSync.run(ctxApp, m) }
+    LaunchedEffect(Unit) { ClipService.ensure(ctxApp) }
     LaunchedEffect(Hc.openPath) { if (Hc.openPath != null) { tab = Tab.Files; Hc.setTab(Tab.Files.ordinal) } }
 
     Scaffold(

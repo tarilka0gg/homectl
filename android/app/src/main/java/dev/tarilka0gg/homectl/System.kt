@@ -214,10 +214,16 @@ fun SystemScreen(onAddMachine: () -> Unit) {
     Section("Clipboard") {
         if (m != null) {
             val common = ClipSync.isOn(m.id)
-            SwitchRow("Common clipboard with ${m.name}", common, ClipSync.note?.takeIf { common } ?: "copy text or a picture on one, paste on the other — works while homectl is open") { on ->
+            val askNotif = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+            SwitchRow("Common clipboard with ${m.name}", common, ClipSync.note?.takeIf { common } ?: "runs in the background with a notification, even when the app is closed") { on ->
                 ClipSync.set(m.id, on)
-                say(true, if (on) "Common clipboard on — only new copies are shared" else "Common clipboard off")
+                if (on) {
+                    if (android.os.Build.VERSION.SDK_INT >= 33 && ctx.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) askNotif.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                    ClipService.ensure(ctx)
+                }
+                say(true, if (on) "Common clipboard on — what you copy on ${m.name} lands on the phone; use the notification's Send clipboard (or the quick-settings tile) to push the phone's" else "Common clipboard off")
             }
+            if (common) Text("Android doesn't let a background app read the phone's clipboard, so to send what you copied on the phone while homectl is closed, tap Send clipboard in the notification. Add the \"Send clipboard\" tile to quick settings for a one-swipe version.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             HorizontalDivider()
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
