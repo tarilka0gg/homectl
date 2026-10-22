@@ -175,7 +175,7 @@ fun MonitorScreen() {
             }
         }
     }
-    Section("Disk I/O") {
+    Section("Disk I/O (all disks)") {
         Chart(listOf(hist.series("dr"), hist.series("dw")), listOf(rxColor, txColor), { fmtRate(it.toDouble()) })
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Legend("read ${fmtRate(io.getDouble("read_bps"))}", rxColor)
@@ -184,18 +184,7 @@ fun MonitorScreen() {
         if (io.has("read_peak")) Text("peak: read ${fmtRate(io.optDouble("read_peak"))} · write ${fmtRate(io.optDouble("write_peak"))}", style = MaterialTheme.typography.bodySmall)
     }
 
-    val disks = d.optJSONArray("disks")?.objs().orEmpty()
-    if (disks.isNotEmpty()) Section("Disks") {
-        disks.forEach { k ->
-            val t = k.getDouble("total")
-            val u = k.getDouble("used")
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(k.str("mount"), style = MaterialTheme.typography.bodyMedium)
-                Text("${fmtBytes(u)} / ${fmtBytes(t)}", style = MaterialTheme.typography.labelMedium)
-            }
-            Bar((u / t).toFloat(), heat((100 * u / t).toFloat()))
-        }
-    }
+    DisksSection(d, hist)
 
     Processes(d.optJSONObject("procs")?.optInt("count") ?: 0, scope)
 }

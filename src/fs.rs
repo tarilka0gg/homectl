@@ -71,7 +71,7 @@ pub async fn download(Query(q): Query<PathQ>, headers: HeaderMap) -> Response {
     let name = p.file_name().map_or("file".into(), |n| n.to_string_lossy().replace('"', ""));
     let mut r = Response::builder()
         .status(if start.is_some() { StatusCode::PARTIAL_CONTENT } else { StatusCode::OK })
-        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_TYPE, media_type(&p))
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\""))
         .header(header::CONTENT_LENGTH, end + 1 - start.unwrap_or(0));
@@ -225,6 +225,122 @@ pub async fn archive_file(Query(q): Query<EntryQ>) -> Response {
             .body(Body::from(b))
             .unwrap(),
         Ok(Err(e)) => err(e),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Content type for what the app can play in place; everything else downloads as raw bytes.
+fn media_type(p: &std::path::Path) -> &'static str {
+    match p.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() {
+        Some("mp4" | "m4v") => "video/mp4",
+        Some("mkv") => "video/x-matroska",
+        Some("webm") => "video/webm",
+        Some("mov") => "video/quicktime",
+        Some("3gp") => "video/3gpp",
+        Some("mp3") => "audio/mpeg",
+        Some("m4a" | "aac") => "audio/mp4",
+        Some("ogg" | "opus" | "oga") => "audio/ogg",
+        Some("flac") => "audio/flac",
+        Some("wav") => "audio/wav",
+        _ => "application/octet-stream",
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SearchQ {
+    path: Option<String>,
+    q: String,
+    hidden: Option<bool>,
+}
+
+/// Recursive, case-insensitive name search below a folder (capped by time and result count).
+pub async fn search(Query(q): Query<SearchQ>) -> Response {
+    let root = resolve(q.path.as_deref());
+    let needle = q.q.trim().to_lowercase();
+    if needle.is_empty() {
+        return Json(json!({"entries": [], "truncated": false})).into_response();
+    }
+    let hidden = q.hidden.unwrap_or(false);
+    let r = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        let (mut out, mut stack, mut truncated) = (vec![], vec![root], false);
+        while let Some(d) = stack.pop() {
+            if out.len() >= 300 || std::time::Instant::now() > deadline {
+                truncated = true;
+                break;
+            }
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !hidden && name.starts_with('.') {
+                    continue;
+                }
+                let Ok(ft) = e.file_type() else { continue };
+                let is_dir = ft.is_dir();
+                if is_dir {
+                    stack.push(e.path());
+                }
+                if name.to_lowercase().contains(&needle) {
+                    let m = e.metadata().ok();
+                    out.push(json!({"name": name, "path": e.path().display().to_string(), "dir": is_dir, "size": m.as_ref().filter(|_| !is_dir).map_or(0, |m| m.len()), "mtime": m.map_or(0, |m| m.mtime())}));
+                }
+            }
+        }
+        json!({"entries": out, "truncated": truncated})
+    })
+    .await;
+    match r {
+        Ok(v) => Json(v).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// What takes the space below a folder: the biggest direct children, staying on one filesystem.
+pub async fn usage(Query(q): Query<PathQ>) -> Response {
+    let root = resolve(q.path.as_deref());
+    let r = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+        let dev = std::fs::metadata(&root).ok()?.dev();
+        let mut timed_out = false;
+        let mut rows = vec![];
+        let mut loose = 0u64;
+        for e in std::fs::read_dir(&root).ok()?.flatten() {
+            let Ok(m) = e.metadata() else { continue };
+            if !m.is_dir() {
+                loose += m.len();
+                continue;
+            }
+            if m.dev() != dev {
+                continue;
+            }
+            let (mut total, mut stack) = (0u64, vec![e.path()]);
+            while let Some(d) = stack.pop() {
+                if std::time::Instant::now() > deadline {
+                    timed_out = true;
+                    break;
+                }
+                let Ok(rd) = std::fs::read_dir(&d) else { continue };
+                for c in rd.flatten() {
+                    let Ok(cm) = c.metadata() else { continue };
+                    if cm.is_dir() {
+                        if cm.dev() == dev {
+                            stack.push(c.path());
+                        }
+                    } else {
+                        total += cm.blocks() * 512;
+                    }
+                }
+            }
+            rows.push((total, e.file_name().to_string_lossy().into_owned(), e.path().display().to_string()));
+        }
+        rows.sort_by(|a, b| b.0.cmp(&a.0));
+        let entries: Vec<_> = rows.into_iter().take(40).map(|(size, name, path)| json!({"name": name, "path": path, "size": size})).collect();
+        Some(json!({"path": root.display().to_string(), "entries": entries, "files_here": loose, "partial": timed_out}))
+    })
+    .await;
+    match r {
+        Ok(Some(v)) => Json(v).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

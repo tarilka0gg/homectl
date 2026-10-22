@@ -13,8 +13,15 @@ import android.util.LruCache
 import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -57,10 +64,12 @@ data class RemoteFile(val name: String, val path: String, val size: Long, val mt
     val pathQuery get() = if (archive != null) "/api/fs/archive/file?path=${android.net.Uri.encode(archive)}&entry=${android.net.Uri.encode(path)}" else "/api/fs/download?path=${android.net.Uri.encode(path)}"
 }
 
-enum class Kind { Image, Text, Pdf, Archive, Other }
+enum class Kind { Image, Text, Pdf, Archive, Video, Audio, Other }
 
 private val imageExt = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "heif")
 private val thumbExt = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp")
+private val videoExt = setOf("mp4", "m4v", "mkv", "webm", "mov", "3gp", "avi", "ts")
+private val audioExt = setOf("mp3", "m4a", "aac", "ogg", "opus", "oga", "flac", "wav")
 private val archiveExt = setOf("zip", "jar", "apk", "tar", "tgz", "gz", "xz", "bz2", "zst", "7z", "rar", "iso", "cbz", "txz", "tbz2")
 private val textExt = setOf(
     "txt", "md", "log", "json", "xml", "yaml", "yml", "toml", "ini", "conf", "cfg", "csv", "tsv", "sh", "bash", "fish", "py", "rs", "c", "h", "cpp", "hpp",
@@ -75,6 +84,8 @@ fun kindOf(name: String): Kind {
         n.endsWith(".tar.gz") || n.endsWith(".tar.xz") || n.endsWith(".tar.bz2") || n.endsWith(".tar.zst") -> Kind.Archive
         ext in imageExt -> Kind.Image
         ext == "pdf" -> Kind.Pdf
+        ext in videoExt -> Kind.Video
+        ext in audioExt -> Kind.Audio
         ext in archiveExt -> Kind.Archive
         ext in textExt || !n.contains('.') && n.first().isLetter() && n.length < 24 && n.all { it.isLetterOrDigit() || it == '-' || it == '_' } && n[0].isUpperCase() -> Kind.Text
         else -> Kind.Other
@@ -178,11 +189,21 @@ fun PreviewDialog(m: Machine, files: List<RemoteFile>, start: Int, onClose: () -
                         }
                     }) { Icon(Icons.Default.Add, "Save to phone", tint = Color.White) }
                 }
-                Box(Modifier.weight(1f).fillMaxWidth()) {
+                var swipe by remember { mutableFloatStateOf(0f) }
+                Box(
+                    Modifier.weight(1f).fillMaxWidth().pointerInput(files.size, index) {
+                        // swipe sideways to page; children that zoom/scroll consume their own drags first
+                        detectHorizontalDragGestures(
+                            onDragStart = { swipe = 0f },
+                            onDragEnd = { if (swipe < -120f && index < files.lastIndex) index++ else if (swipe > 120f && index > 0) index-- },
+                        ) { _, dx -> swipe += dx }
+                    },
+                ) {
                     key(f.path, f.archive) {
                         when (f.kind) {
                             Kind.Image -> ImageViewer(m, f)
                             Kind.Pdf -> PdfViewer(m, f)
+                            Kind.Video, Kind.Audio -> MediaViewer(m, f)
                             else -> TextViewer(m, f)
                         }
                     }
@@ -246,7 +267,20 @@ private fun ImageViewer(m: Machine, f: RemoteFile) {
         else -> Image(
             bmp!!, f.name,
             Modifier.fillMaxSize()
-                .pointerInput(Unit) { detectTransformGestures { _, pan, zoom, _ -> scale = (scale * zoom).coerceIn(1f, 8f); if (scale > 1f) { ox += pan.x; oy += pan.y } else { ox = 0f; oy = 0f } } }
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        do {
+                            val ev = awaitPointerEvent()
+                            if (ev.changes.size > 1 || scale > 1f) {
+                                scale = (scale * ev.calculateZoom()).coerceIn(1f, 8f)
+                                val pan = ev.calculatePan()
+                                if (scale > 1f) { ox += pan.x; oy += pan.y } else { ox = 0f; oy = 0f }
+                                ev.changes.forEach { if (it.positionChanged()) it.consume() }
+                            }
+                        } while (ev.changes.any { it.pressed })
+                    }
+                }
                 .pointerInput(Unit) { detectTapGestures(onDoubleTap = { if (scale > 1f) { scale = 1f; ox = 0f; oy = 0f } else scale = 3f }) }
                 .graphicsLayer { scaleX = scale; scaleY = scale; translationX = ox; translationY = oy },
             contentScale = ContentScale.Fit,
@@ -324,5 +358,44 @@ private fun PdfViewer(m: Machine, f: RemoteFile) {
                     ?: Box(Modifier.fillMaxWidth().height(300.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             }
         }
+    }
+}
+
+@Composable
+private fun MediaViewer(m: Machine, f: RemoteFile) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var failed by remember { mutableStateOf(false) }
+    var local by remember { mutableStateOf<File?>(null) }
+    var progress by remember { mutableStateOf<Float?>(0f) }
+    val base = m.active?.url
+    // files on a machine stream straight from it (Range requests); entries inside an archive are fetched first
+    LaunchedEffect(f.path, f.archive) { if (f.archive != null) local = fetchToCache(ctx, m, f) { progress = it } ?: run { failed = true; null } }
+    if (failed) {
+        Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("This phone can't play this file here.", color = Color.White)
+            Spacer(Modifier.height(12.dp))
+            FilledTonalButton({ scope.launch { fetchToCache(ctx, m, f)?.let { openFile(ctx, it, f.name) } ?: Toast.makeText(ctx, "Download failed", Toast.LENGTH_SHORT).show() } }) { Text("Open with…") }
+        }
+        return
+    }
+    if (f.archive != null && local == null || f.archive == null && base == null) return Loading(progress)
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        if (f.kind == Kind.Audio) Text("🎵", style = MaterialTheme.typography.displayLarge)
+        AndroidView(
+            factory = { c ->
+                android.widget.VideoView(c).apply {
+                    val mc = android.widget.MediaController(c)
+                    mc.setAnchorView(this)
+                    setMediaController(mc)
+                    setOnErrorListener { _, _, _ -> failed = true; true }
+                    setOnPreparedListener { it.isLooping = false; start() }
+                    if (local != null) setVideoPath(local!!.path)
+                    else setVideoURI(android.net.Uri.parse(base + f.pathQuery), mapOf("Authorization" to "Bearer ${m.token}"))
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+            onRelease = { it.stopPlayback() },
+        )
     }
 }

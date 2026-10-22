@@ -158,6 +158,66 @@ fn disk_sectors() -> (u64, u64) {
     (r, w)
 }
 
+
+/// Raw /proc/diskstats counters of one whole disk.
+#[derive(Clone, Copy, Default)]
+struct DiskRaw {
+    reads: u64,
+    sect_r: u64,
+    writes: u64,
+    sect_w: u64,
+    busy_ms: u64,
+}
+
+fn is_whole_disk(name: &str) -> bool {
+    (name.starts_with("nvme") && name.contains('n') && !name.contains('p'))
+        || ((name.starts_with("sd") || name.starts_with("vd") || name.starts_with("xvd")) && !name.chars().last().is_some_and(|c| c.is_ascii_digit()))
+        || (name.starts_with("mmcblk") && !name.contains('p'))
+}
+
+fn disk_devs() -> Vec<(String, DiskRaw)> {
+    read("/proc/diskstats")
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let name = *f.get(2)?;
+            if !is_whole_disk(name) {
+                return None;
+            }
+            let g = |i: usize| f.get(i).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
+            Some((name.to_string(), DiskRaw { reads: g(3), sect_r: g(5), writes: g(7), sect_w: g(9), busy_ms: g(12) }))
+        })
+        .collect()
+}
+
+/// Model, size and kind of a disk from sysfs.
+fn disk_info(name: &str) -> Value {
+    let b = format!("/sys/block/{name}");
+    let model = ["device/model", "device/name"].iter().map(|p| read(&format!("{b}/{p}")).trim().to_string()).find(|m| !m.is_empty()).unwrap_or_default();
+    let size = num(&format!("{b}/size")).unwrap_or(0.0) * 512.0;
+    let rotational = num(&format!("{b}/queue/rotational")) == Some(1.0);
+    let kind = if name.starts_with("nvme") { "NVMe SSD" } else if rotational { "HDD" } else if name.starts_with("mmcblk") { "SD/eMMC" } else { "SSD" };
+    json!({"model": model, "size": size, "kind": kind})
+}
+
+fn disk_temp(name: &str) -> Option<f64> {
+    std::fs::read_dir(format!("/sys/block/{name}/device")).ok()?.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("hwmon")).find_map(|e| num(&format!("{}/temp1_input", e.path().display())).map(|t| t / 1000.0))
+}
+
+/// Processes' cumulative disk bytes (only those we are allowed to read, i.e. our own).
+fn proc_io() -> HashMap<u32, (String, u64, u64)> {
+    let Ok(dir) = std::fs::read_dir("/proc") else { return HashMap::new() };
+    dir.flatten()
+        .filter_map(|e| {
+            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+            let t = std::fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
+            let get = |k: &str| t.lines().find_map(|l| l.strip_prefix(k)?.trim().parse::<u64>().ok()).unwrap_or(0);
+            let name = read(&format!("/proc/{pid}/comm")).trim().to_string();
+            Some((pid, (name, get("read_bytes:"), get("write_bytes:"))))
+        })
+        .collect()
+}
+
 struct RawProc {
     pid: u32,
     name: String,
@@ -278,7 +338,7 @@ fn disks() -> Value {
         }
         let (bs, total, free) = (st.f_frsize as u64, st.f_blocks as u64, st.f_bfree as u64);
         if total > 0 {
-            list.push(json!({"mount": mount, "dev": f[0], "total": total * bs, "used": (total - free) * bs}));
+            list.push(json!({"mount": mount, "dev": f[0], "fs": f[2], "total": total * bs, "used": (total - free) * bs}));
         }
     }
     json!(list)
@@ -506,6 +566,9 @@ pub fn start() -> Monitor {
         let core_ids = core_id_map(prev_cpu.len().saturating_sub(1));
         let mut prev_net: HashMap<String, (u64, u64)> = net_ifaces().into_iter().map(|i| (i.name, (i.rx, i.tx))).collect();
         let (mut prev_dr, mut prev_dw) = disk_sectors();
+        let mut prev_dev: HashMap<String, DiskRaw> = disk_devs().into_iter().collect();
+        let mut prev_pio = proc_io();
+        let mut dev_info: HashMap<String, Value> = HashMap::new();
         let mut prev_ticks: HashMap<u32, u64> = raw_procs().into_iter().map(|p| (p.pid, p.ticks)).collect();
         let mut cmds: HashMap<u32, String> = HashMap::new();
         let (mut rx_peak, mut tx_peak, mut dr_peak, mut dw_peak) = (0f64, 0f64, 0f64, 0f64);
@@ -565,6 +628,43 @@ pub fn start() -> Monitor {
             (prev_dr, prev_dw) = (dr, dw);
             dr_peak = dr_peak.max(drr);
             dw_peak = dw_peak.max(dwr);
+
+            // per physical disk: throughput, IOPS and how busy it is (io_ticks = ms with I/O in flight)
+            let mut dev_json = vec![];
+            for (name, c) in disk_devs() {
+                let p = prev_dev.get(&name).copied().unwrap_or(c);
+                let (rb, wb) = (c.sect_r.saturating_sub(p.sect_r) as f64 * 512.0 / dt, c.sect_w.saturating_sub(p.sect_w) as f64 * 512.0 / dt);
+                let (ri, wi) = (c.reads.saturating_sub(p.reads) as f64 / dt, c.writes.saturating_sub(p.writes) as f64 / dt);
+                let busy = (c.busy_ms.saturating_sub(p.busy_ms) as f64 / (dt * 10.0)).min(100.0);
+                hist.push(&format!("disk.{name}.r"), Some(rb));
+                hist.push(&format!("disk.{name}.w"), Some(wb));
+                hist.push(&format!("disk.{name}.busy"), Some(busy));
+                let info = dev_info.entry(name.clone()).or_insert_with(|| disk_info(&name)).clone();
+                let parts: Vec<Value> = disk_cache
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|d| d["dev"].as_str().and_then(|x| x.strip_prefix("/dev/")).is_some_and(|b| b == name || b.strip_prefix(name.as_str()).is_some_and(|r| r.trim_start_matches('p').chars().all(|ch| ch.is_ascii_digit()))))
+                    .cloned()
+                    .collect();
+                dev_json.push(json!({"name": name, "model": info["model"], "size": info["size"], "kind": info["kind"], "temp": disk_temp(&name),
+                    "read_bps": rb, "write_bps": wb, "read_iops": ri, "write_iops": wi, "busy": busy, "parts": parts}));
+                prev_dev.insert(name, c);
+            }
+
+            // which processes are reading/writing right now (own processes unless running as root)
+            let pio = proc_io();
+            let mut io_rows: Vec<(f64, Value)> = pio
+                .iter()
+                .filter_map(|(pid, (name, r, w))| {
+                    let (pr, pw) = prev_pio.get(pid).map(|(_, a, b)| (*a, *b))?;
+                    let (rr, ww) = (r.saturating_sub(pr) as f64 / dt, w.saturating_sub(pw) as f64 / dt);
+                    (rr + ww >= 1024.0).then(|| (rr + ww, json!({"pid": pid, "name": name, "read_bps": rr, "write_bps": ww})))
+                })
+                .collect();
+            io_rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+            let disk_procs: Vec<Value> = io_rows.into_iter().take(8).map(|x| x.1).collect();
+            prev_pio = pio;
 
             // processes
             let ps = raw_procs();
@@ -655,6 +755,9 @@ pub fn start() -> Monitor {
                 "net": {"rx_bps": rxr, "tx_bps": txr, "rx_peak": rx_peak, "tx_peak": tx_peak, "rx_total": rx_tot, "tx_total": tx_tot, "ifaces": iface_json},
                 "disk_io": {"read_bps": drr, "write_bps": dwr, "read_peak": dr_peak, "write_peak": dw_peak},
                 "disks": disk_cache,
+                "disk_devs": dev_json,
+                "disk_procs": disk_procs,
+                "disk_procs_scope": if unsafe { libc::geteuid() } == 0 { "all" } else { "own" },
                 "temps": temps,
                 "fans": fans,
                 "battery": bat,
