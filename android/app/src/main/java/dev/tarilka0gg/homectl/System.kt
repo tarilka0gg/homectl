@@ -205,13 +205,33 @@ fun SystemScreen(onAddMachine: () -> Unit) {
         busy = false
         say(ok, if (ok) "Sent ${chars(t)} to ${m?.name ?: "the machine"}'s clipboard" else "Couldn't send — is ${m?.name ?: "the machine"} reachable?")
     }
+    var sendPicker by remember { mutableStateOf(false) }
+    var getPicker by remember { mutableStateOf(false) }
+    if (sendPicker) SendPicker(m?.name ?: "machine", onPick = { t -> clip = t; scope.launch { sendText(t); PhoneClips.add(t, "sent") } }, onClose = { sendPicker = false })
+    if (getPicker && m != null) GetPicker(m, onPick = { t ->
+        machineClip = t; machineClipType = "text"; machineImage = null
+        PhoneClips.write(ctx, t); PhoneClips.add(t, "from ${m.name}")
+        say(true, "Copied ${chars(t)} from ${m.name} to the phone's clipboard")
+    }, onClose = { getPicker = false }, onNote = { ok, text -> say(ok, text) })
     Section("Clipboard") {
+        if (m != null) {
+            val common = ClipSync.isOn(m.id)
+            SwitchRow("Common clipboard with ${m.name}", common, ClipSync.note?.takeIf { common } ?: "copy on one, paste on the other — works while homectl is open") { on ->
+                ClipSync.set(m.id, on)
+                say(true, if (on) "Common clipboard on — only new copies are shared" else "Common clipboard off")
+            }
+            HorizontalDivider()
+        }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilledTonalButton({ sendPicker = true }) { Text("Choose what to send…") }
+            FilledTonalButton({ getPicker = true }, enabled = m != null) { Text("Choose what to get…") }
+        }
         Text("Phone → ${m?.name ?: "machine"}", style = MaterialTheme.typography.titleSmall)
         OutlinedTextField(clip, { clip = it }, Modifier.fillMaxWidth(), label = { Text("Text to send") }, minLines = 2, maxLines = 6)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton({
                 val t = phoneClip()
-                if (t.isEmpty()) say(false, "The phone's clipboard is empty") else { clip = t; say(true, "Pasted ${chars(t)} from the phone's clipboard") }
+                if (t.isEmpty()) say(false, "The phone's clipboard is empty") else { clip = t; PhoneClips.add(t, "copied on phone"); say(true, "Pasted ${chars(t)} from the phone's clipboard") }
             }) { Text("Paste from phone") }
             FilledTonalButton({ scope.launch { sendText(clip) } }, enabled = !busy) { Text("Send text") }
             Button({

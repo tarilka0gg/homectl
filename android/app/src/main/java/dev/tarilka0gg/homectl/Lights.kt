@@ -44,8 +44,28 @@ fun LightsScreen() {
         Text("None found. Enable \"LAN Control\" for each light in the Govee app.", style = MaterialTheme.typography.bodyMedium)
     }
     if (list.size > 1) Section("All lights") {
-        SwitchRow("Everything", list.any { it.optBoolean("on") }, "${list.count { it.optBoolean("on") }} of ${list.size} on") { on ->
+        val anyOn = list.any { it.optBoolean("on") }
+        SwitchRow("Everything", anyOn, "${list.count { it.optBoolean("on") }} of ${list.size} on") { on ->
             act { list.forEach { Hc.post("/api/lights/${it.str("ip")}", body("on" to on)) } }
+        }
+        SliderRow("Brightness — all lights", list.map { it.optInt("brightness", 100) }.average().toFloat(), 100f, 1f, enabled = anyOn) { b ->
+            act { list.forEach { Hc.post("/api/lights/${it.str("ip")}", body("brightness" to b)) } }
+        }
+        val first = list.first().optJSONArray("rgb")?.let { a -> Triple(a.optInt(0), a.optInt(1), a.optInt(2)) }
+        val same = list.all { it.optJSONArray("rgb")?.let { a -> Triple(a.optInt(0), a.optInt(1), a.optInt(2)) } == first }
+        Text("One colour for every light", style = MaterialTheme.typography.titleSmall)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+            ColorWheel(if (same) first else null, enabled = true) { c ->
+                act { list.forEach { Hc.post("/api/lights/${it.str("ip")}", body("on" to true, "rgb" to JSONArray(listOf(c.first, c.second, c.third)))) } }
+            }
+        }
+        SliderRow("White temperature (K) — all lights", 4000f, 9000f, 2000f) { k -> act { list.forEach { Hc.post("/api/lights/${it.str("ip")}", body("on" to true, "kelvin" to k)) } } }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            presets.forEach { (_, c) ->
+                Box(Modifier.size(36.dp).clip(CircleShape).background(Color(c.first, c.second, c.third)).clickable {
+                    act { list.forEach { Hc.post("/api/lights/${it.str("ip")}", body("on" to true, "rgb" to JSONArray(listOf(c.first, c.second, c.third)))) } }
+                })
+            }
         }
     }
     list.forEachIndexed { i, l ->

@@ -1,5 +1,6 @@
 mod actions;
 mod archive;
+mod clip;
 mod ctl;
 mod display;
 mod fs;
@@ -397,6 +398,7 @@ async fn monitor_post(Path(d): Path<u8>, Json(p): Json<Percent>) -> StatusCode {
     status(ctl::monitor_brightness_set(d, p.percent).await)
 }
 async fn clip_get() -> impl IntoResponse {
+    clip::touch();
     let types = ctl::clipboard_types().await;
     let has_text = types.iter().any(|t| t.starts_with("text/") || t == "UTF8_STRING" || t == "STRING");
     let image = types.iter().find(|t| t.starts_with("image/")).cloned();
@@ -425,7 +427,51 @@ struct Text {
 }
 
 async fn clip_post(Json(t): Json<Text>) -> StatusCode {
-    status(ctl::clipboard_set(&t.text).await)
+    clip::touch();
+    let ok = ctl::clipboard_set(&t.text).await;
+    if ok {
+        clip::sent_by_phone(&t.text);
+    }
+    status(ok)
+}
+
+async fn clip_state() -> impl IntoResponse {
+    Json(clip::state())
+}
+
+async fn clip_history() -> impl IntoResponse {
+    Json(clip::history())
+}
+
+async fn clip_history_clear() -> StatusCode {
+    clip::clear();
+    StatusCode::NO_CONTENT
+}
+
+async fn clip_item(Path(id): Path<u64>) -> Response {
+    match clip::get(id) {
+        Some(t) => Json(json!({"text": t})).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Makes a history entry the machine's current clipboard again.
+async fn clip_item_use(Path(id): Path<u64>) -> StatusCode {
+    match clip::get(id) {
+        Some(t) => {
+            let ok = ctl::clipboard_set(&t).await;
+            if ok {
+                clip::sent_by_phone(&t);
+            }
+            status(ok)
+        }
+        None => StatusCode::NOT_FOUND,
+    }
+}
+
+async fn clip_item_forget(Path(id): Path<u64>) -> StatusCode {
+    clip::forget(id);
+    StatusCode::NO_CONTENT
 }
 
 async fn cam_get(Path(n): Path<u8>) -> Response {
@@ -617,6 +663,10 @@ async fn main() {
         .route("/monitors/{d}/brightness", get(monitor_get).post(monitor_post))
         .route("/clipboard", get(clip_get).post(clip_post))
         .route("/clipboard/image", get(clip_image))
+        .route("/clipboard/state", get(clip_state))
+        .route("/clipboard/history", get(clip_history).delete(clip_history_clear))
+        .route("/clipboard/history/{id}", get(clip_item).delete(clip_item_forget))
+        .route("/clipboard/history/{id}/use", post(clip_item_use))
         .route("/webcam/{n}", get(cam_get).post(cam_post))
         .route("/power/{action}", post(power_post))
         .route("/procs", get(procs))
@@ -665,6 +715,7 @@ async fn main() {
         .with_state(app.clone());
 
     let router = open.nest("/api", api);
+    clip::start();
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
     eprintln!("homectl listening on {addr} ({})", if tls.is_some() { "plain and encrypted" } else { "plain only" });
     let acceptor = tls.map(|t| t.acceptor);
