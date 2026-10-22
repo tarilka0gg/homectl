@@ -555,7 +555,7 @@ async fn tunnel_get(State(app): S) -> impl IntoResponse {
 async fn tunnel_post(State(app): S, Json(c): Json<On>) -> StatusCode {
     let mut task = app.tunnel_task.lock().unwrap();
     if c.on && task.is_none() {
-        *task = Some(net::spawn_tunnel(app.port, app.tunnel.clone()));
+        *task = Some(net::spawn_tunnel(app.port, app.tunnel.clone(), app.token.clone()));
     } else if !c.on {
         if let Some(t) = task.take() {
             t.abort();
@@ -654,7 +654,7 @@ async fn main() {
     let inbox = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join("homectl-inbox");
     std::fs::create_dir_all(&inbox).expect("create inbox");
     let tunnel: net::TunnelUrl = Default::default();
-    let tunnel_task = std::env::var("HOMECTL_TUNNEL").is_ok_and(|v| v == "quick").then(|| net::spawn_tunnel(port, tunnel.clone()));
+    let tunnel_task = std::env::var("HOMECTL_TUNNEL").is_ok_and(|v| v == "quick").then(|| net::spawn_tunnel(port, tunnel.clone(), token.clone()));
     let app = Arc::new(App {
         token,
         inbox,

@@ -33,7 +33,9 @@ data class Endpoint(val kind: String, val url: String, val token: String? = null
  * them: probes all in parallel and uses the best one that answers. The daemon reports its current addresses on
  * every connection, so a changed tunnel URL is learned automatically.
  */
-class Machine(val id: String, name: String, val token: String, endpoints: List<Endpoint>, fp: String? = null) {
+class Machine(val id: String, name: String, val token: String, endpoints: List<Endpoint>, fp: String? = null, rv: String? = null) {
+    /** Private channel where this machine announces its current tunnel address (signed with the access token). */
+    var rv by mutableStateOf(rv)
     /** SHA-256 of this machine's certificate, pinned at pairing: connections to it are encrypted and checked against it. */
     var fp by mutableStateOf(fp)
     /** True when the machine presented a different certificate than the pinned one. */
@@ -43,7 +45,8 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
     var active by mutableStateOf<Endpoint?>(null)
     var offline by mutableStateOf(false)
 
-    private val order = listOf("tailscale", "lan", "server", "tunnel")
+    // same network first; away from home the tunnel, then the route through another machine; the self-hosted tailnet last
+    private val order = listOf("lan", "tunnel", "server", "tailscale")
 
     /** The certificate to pin for [e]: the relay's own for a route through another machine, none for a public https tunnel. */
     fun pinFor(e: Endpoint): String? = when {
@@ -108,10 +111,23 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
      * address answers, or — when only a lower-priority one has answered — after a short grace period for better ones.
      */
     suspend fun resolve(): Endpoint? {
+        // a route through another machine needs that machine's current address first
+        endpoints.mapNotNull { it.hub }.distinct().forEach { id -> Hc.machines.find { it.id == id }?.let { hub -> if (hub.active == null) hub.resolve() } }
         endpoints = endpoints.map { e ->
             val hub = e.hub?.let { id -> Hc.machines.find { it.id == id } }?.active?.url ?: return@map e
             e.copy(url = hub + "/peer/" + e.url.substringAfterLast("/peer/"))
         }
+        pick()
+        if (active == null && lookupAnnouncedTunnel()) pick()
+        offline = active == null
+        if (active != null) certProblem = false
+        active?.let { refreshEndpoints(it) }
+        if (active != null) Hc.autoLinkAll()
+        return active
+    }
+
+    /** Probes every address at once and keeps the best one that answers (see [order]). */
+    private suspend fun pick() {
         val cands = endpoints.sortedBy { order.indexOf(it.kind).let { i -> if (i < 0) 99 else i } }
         val results = Channel<Pair<Int, Boolean>>(Channel.UNLIMITED)
         cands.forEachIndexed { i, e -> probes.launch { results.trySend(i to ping(e)) } }
@@ -129,15 +145,54 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
             if (r.second && firstOkAt == 0L) firstOkAt = System.currentTimeMillis()
         }
         active = pick?.let { cands[it] }
-        offline = active == null
-        if (active != null) certProblem = false
-        active?.let { refreshEndpoints(it) }
-        return active
+    }
+
+    private var lastLookup = 0L
+
+    class Announcement(val url: String, val ts: Long)
+
+    /** The newest correctly signed tunnel address on the machine's announcement channel (or null). Nothing unsigned is ever trusted. */
+    suspend fun fetchAnnouncement(): Announcement? = withContext(Dispatchers.IO) {
+        val topic = rv ?: return@withContext null
+        try {
+            val c = java.net.URL("https://ntfy.sh/$topic/json?poll=1&since=12h").openConnection() as java.net.HttpURLConnection
+            c.connectTimeout = 6000; c.readTimeout = 8000
+            val lines = c.inputStream.bufferedReader().readText().lines()
+            val mac = javax.crypto.Mac.getInstance("HmacSHA256").apply { init(javax.crypto.spec.SecretKeySpec(token.toByteArray(), "HmacSHA256")) }
+            var best: Announcement? = null
+            for (l in lines) {
+                val m = runCatching { JSONObject(JSONObject(l).optString("message")) }.getOrNull() ?: continue
+                val url = m.optString("url"); val ts = m.optLong("ts"); val sig = m.optString("sig")
+                if (!Regex("https://[a-z0-9-]+\\.trycloudflare\\.com").matches(url)) continue
+                val want = mac.doFinal("$url|$ts".toByteArray()).joinToString("") { "%02x".format(it) }
+                if (want.length != sig.length || want.zip(sig).fold(0) { a, (x, y) -> a or (x.code xor y.code) } != 0) continue
+                if (best == null || ts > best.ts) best = Announcement(url, ts)
+            }
+            best
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Nothing answers: ask the announcement channel for the tunnel's current address and, if it is new, use it. */
+    private suspend fun lookupAnnouncedTunnel(): Boolean {
+        if (rv == null || System.currentTimeMillis() - lastLookup < 20_000) return false
+        lastLookup = System.currentTimeMillis()
+        val a = fetchAnnouncement() ?: return false
+        val seen = Hc.memStr("rvts.$id", "0").toLongOrNull() ?: 0L
+        if (a.ts < seen) return false // an older announcement replayed
+        val have = endpoints.firstOrNull { it.kind == "tunnel" }?.url
+        Hc.memPutStr("rvts.$id", a.ts.toString())
+        if (have == a.url) return false
+        endpoints = endpoints.filter { it.kind != "tunnel" } + Endpoint("tunnel", a.url)
+        Hc.save()
+        return true
     }
 
     private suspend fun refreshEndpoints(via: Endpoint) {
         val j = raw(via, "GET", "/api/endpoints")?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return
         j.optString("fp").ifBlank { null }?.let { found -> if (fp == null) { fp = found; Hc.save() } } // first contact: pin it
+        j.optString("rv").ifBlank { null }?.let { found -> if (rv != found) { rv = found; Hc.save() } }
         val a = j.optJSONArray("urls") ?: return
         val fresh = (0 until a.length()).map { a.getJSONObject(it).let { o -> Endpoint(o.getString("kind"), o.getString("url"), o.optString("token").ifBlank { null }, o.optString("hub").ifBlank { null }) } }
         if (fresh.isNotEmpty()) {
@@ -442,7 +497,7 @@ object Hc {
             val a = JSONArray(s)
             for (i in 0 until a.length()) {
                 val o = a.getJSONObject(i)
-                machines.add(Machine(o.getString("id"), o.getString("name"), o.getString("token"), parseEndpoints(o.getJSONArray("endpoints")), o.optString("fp").ifBlank { null }))
+                machines.add(Machine(o.getString("id"), o.getString("name"), o.getString("token"), parseEndpoints(o.getJSONArray("endpoints")), o.optString("fp").ifBlank { null }, o.optString("rv").ifBlank { null }))
             }
         } ?: migrateV1()
         if (machines.isNotEmpty() && prefs.getString("machines", null) != null) save() // moves an old plain-text list into the keyring
@@ -464,7 +519,7 @@ object Hc {
     fun save() {
         val a = JSONArray()
         machines.forEach { m ->
-            a.put(JSONObject().put("id", m.id).put("name", m.name).put("token", m.token).put("fp", m.fp ?: "").put("endpoints", JSONArray().also { ea ->
+            a.put(JSONObject().put("id", m.id).put("name", m.name).put("token", m.token).put("fp", m.fp ?: "").put("rv", m.rv ?: "").put("endpoints", JSONArray().also { ea ->
                 m.endpoints.forEach { ea.put(JSONObject().put("kind", it.kind).put("url", it.url).put("token", it.token ?: "").put("hub", it.hub ?: "")) }
             }))
         }
@@ -515,14 +570,39 @@ object Hc {
             urls = listOf(link.trim().trimEnd('/'))
         }
         if (token.isEmpty() || urls.isEmpty()) return false
-        add(Machine(token.take(10), name, token, urls.map { Endpoint(kindOf(it), it.trimEnd('/')) }, uri.getQueryParameter("fp")?.ifBlank { null }))
+        add(Machine(token.take(10), name, token, urls.map { Endpoint(kindOf(it), it.trimEnd('/')) }, uri.getQueryParameter("fp")?.ifBlank { null }, uri.getQueryParameter("rv")?.ifBlank { null }))
         return true
+    }
+
+    private val autoLinked = HashSet<String>()
+    private var autoLinking = false
+
+    /**
+     * A machine that has a tunnel (reachable from anywhere) becomes the way to reach the other machines when you are away from
+     * home: every other paired machine gets registered with it once, so away from home "gentoo" simply keeps working through
+     * the server. Switched off per machine by pressing Unlink in System → Reach … through a server.
+     */
+    suspend fun autoLinkAll() {
+        for (h in machines.toList()) if (h.active != null && h.active?.kind != "server") autoLink(h)
+    }
+
+    suspend fun autoLink(hub: Machine) {
+        if (autoLinking || hub.endpoints.none { it.kind == "tunnel" }) return
+        autoLinking = true
+        try {
+            for (t in machines.toList()) {
+                if (t.id == hub.id || relayedVia(t, hub) || memBool("autolink.skip.${t.id}.${hub.id}") || "${t.id}>${hub.id}" in autoLinked) continue
+                autoLinked.add("${t.id}>${hub.id}")
+                if (!linkViaServer(t, hub)) autoLinked.remove("${t.id}>${hub.id}")
+            }
+        } finally { autoLinking = false }
     }
 
     fun relayedVia(m: Machine, hub: Machine) = m.endpoints.any { it.hub == hub.id }
 
     /** Makes [hub] (e.g. the home server) relay to [target], so the app can reach [target] through the hub alone. */
     suspend fun linkViaServer(target: Machine, hub: Machine): Boolean {
+        memPutBool("autolink.skip.${target.id}.${hub.id}", false)
         val hubUrl = hub.active?.url ?: hub.resolve()?.url ?: return false
         // the hub reaches the target by its own network (tailnet / LAN), not through us
         val direct = target.endpoints.firstOrNull { it.kind == "tailscale" } ?: target.endpoints.firstOrNull { it.kind == "lan" } ?: return false
@@ -536,6 +616,7 @@ object Hc {
     }
 
     suspend fun unlinkViaServer(target: Machine, hub: Machine) {
+        memPutBool("autolink.skip.${target.id}.${hub.id}", true)
         val peerId = target.id.filter { it.isLetterOrDigit() }.take(24)
         hub.call("DELETE", "/api/peers/$peerId")
         target.endpoints = target.endpoints.filter { it.hub != hub.id }

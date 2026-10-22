@@ -1,7 +1,8 @@
 #!/sbin/openrc-run
 # homectl daemon as an OpenRC service, supervised (restarts itself if it ever crashes).
 # Settings live in /etc/conf.d/homectl:  HOMECTL_USER=...  HOMECTL_BIN=/path/to/homectl
-# Optional public tunnel:  export HOMECTL_TUNNEL=quick  (and make sure cloudflared is on PATH)
+# Public tunnel (default on, so the app can reach this machine away from home): HOMECTL_TUNNEL=quick uses a Cloudflare quick tunnel
+# via the cloudflared next to the binary (or on PATH); set HOMECTL_TUNNEL=off in /etc/conf.d/homectl to disable.
 description="homectl control daemon"
 
 : "${HOMECTL_USER:=root}"
@@ -21,6 +22,11 @@ depend() {
 }
 
 start_pre() {
+	# an outbound-only tunnel, so the phone can reach this machine from anywhere (no port forwarding, works behind carrier NAT)
+	if [ "${HOMECTL_TUNNEL:-quick}" != "off" ]; then
+		export HOMECTL_TUNNEL=quick
+		if [ -x "$(dirname "$HOMECTL_BIN")/cloudflared" ]; then export HOMECTL_CLOUDFLARED="$(dirname "$HOMECTL_BIN")/cloudflared"; fi
+	fi
 	# the daemon keeps its token and settings under $HOME
 	HOME="$(getent passwd "$HOMECTL_USER" | cut -d: -f6)"
 	export HOME

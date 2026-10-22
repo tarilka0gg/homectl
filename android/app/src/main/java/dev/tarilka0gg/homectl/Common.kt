@@ -205,6 +205,11 @@ fun ConnectionTest(m: Machine, autoRun: Boolean = false) {
                 tail.isNotEmpty() && tail.all { !it.ok } -> "Tailscale is on, but the machine doesn't answer through it: the machine may be off, homectl stopped, or the tailnet can't find a path (a self-hosted Headscale that is only reachable on the home network can't hand out new routes while you're away)."
                 else -> "None of the machine's addresses answer from here."
             }
+            var announced by remember(m.id) { mutableStateOf<String?>(null) }
+            LaunchedEffect(rs) {
+                if (m.rv != null && rs.none { it.ok }) announced = m.fetchAnnouncement()?.let { "last tunnel address announced by ${m.name}: ${it.url.removePrefix("https://")} (${agoShort(it.ts * 1000)})" } ?: "no signed tunnel announcement found for ${m.name} (is its tunnel switched on?)"
+            }
+            announced?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             hint?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
         }
     }

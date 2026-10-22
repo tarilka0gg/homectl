@@ -10,7 +10,8 @@ pub type TunnelUrl = Arc<RwLock<Option<String>>>;
 
 /// Keeps `cloudflared tunnel --url` running and records the public URL it prints.
 /// Quick tunnels get a new random URL on every start; clients learn it from /api/endpoints.
-pub fn spawn_tunnel(port: u16, url: TunnelUrl) -> tokio::task::JoinHandle<()> {
+pub fn spawn_tunnel(port: u16, url: TunnelUrl, token: String) -> tokio::task::JoinHandle<()> {
+    announce_loop(url.clone(), token);
     tokio::spawn(async move {
         let bin = std::env::var("HOMECTL_CLOUDFLARED").unwrap_or_else(|_| "cloudflared".into());
         loop {
@@ -76,7 +77,7 @@ pub async fn endpoints(port: u16, tunnel: &TunnelUrl, fp: &str) -> Value {
         urls.push(json!({"kind": "tunnel", "url": u}));
     }
     let name = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
-    json!({ "name": name.trim(), "urls": urls, "fp": fp })
+    json!({ "name": name.trim(), "urls": urls, "fp": fp, "rv": rendezvous_topic() })
 }
 
 /// `homectl pair`: print a homectl://pair link (and QR) for the app, using the running daemon's endpoint list.
@@ -99,6 +100,9 @@ pub async fn pair(port: u16, token: &str) {
     if let Some(fp) = v["fp"].as_str().filter(|f| !f.is_empty()) {
         link.push_str(&format!("&fp={fp}"));
     }
+    if let Some(rv) = v["rv"].as_str().filter(|f| !f.is_empty()) {
+        link.push_str(&format!("&rv={rv}"));
+    }
     println!("{link}\n");
     let _ = std::process::Command::new("qrencode").args(["-t", "ANSIUTF8", &link]).status();
     // Phones that asked to pair by code appear here (also useful on servers without a desktop).
@@ -111,4 +115,75 @@ pub async fn pair(port: u16, token: &str) {
             println!("pairing request from {}: code {} (expires in {}s)", p["device"], p["code"], p["expires_in"]);
         }
     }
+}
+
+// ---- rendezvous: how a phone that is away learns the tunnel's current address ----
+//
+// A free Cloudflare quick tunnel gets a new random address every time it restarts, and the phone can only be told while it is
+// on the same network. So the daemon posts its current address to a private topic on the public ntfy.sh service, signed with
+// the machine's access token (HMAC-SHA256 over "url|timestamp"). The phone polls that topic when nothing else answers and
+// only accepts messages whose signature checks out and that are newer than the last one it used — so someone who learns the
+// topic name can neither point the phone elsewhere nor make it send the token anywhere.
+
+pub fn rendezvous_topic() -> String {
+    let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config/homectl");
+    let f = dir.join("rendezvous");
+    if let Ok(t) = std::fs::read_to_string(&f) {
+        let t = t.trim().to_string();
+        if t.starts_with("homectl-") && t.len() >= 32 {
+            return t;
+        }
+    }
+    let t = format!("homectl-{}", crate::pair::rand_bytes::<16>().iter().map(|b| format!("{b:02x}")).collect::<String>());
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(&f, &t);
+    let _ = std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+    t
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+pub fn sign_announcement(token: &str, url: &str, ts: u64) -> String {
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, token.as_bytes());
+    hex(ring::hmac::sign(&key, format!("{url}|{ts}").as_bytes()).as_ref())
+}
+
+async fn announce(topic: &str, token: &str, url: &str) {
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let body = json!({"v": 1, "url": url, "ts": ts, "sig": sign_announcement(token, url, ts)}).to_string();
+    let r = Command::new("curl")
+        .args(["-s", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}", "-H", "Title: homectl", "-H", "Priority: min", "-d", &body, &format!("https://ntfy.sh/{topic}")])
+        .output()
+        .await;
+    match r {
+        Ok(o) if o.stdout == b"200" => eprintln!("tunnel address announced"),
+        Ok(o) => eprintln!("announcing the tunnel address failed (HTTP {})", String::from_utf8_lossy(&o.stdout)),
+        Err(e) => eprintln!("announcing the tunnel address failed: {e}"),
+    }
+}
+
+/// Posts the tunnel address when it appears or changes, and again every 25 minutes (ntfy keeps messages for 12 hours).
+fn announce_loop(url: TunnelUrl, token: String) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    if std::env::var("HOMECTL_NO_RENDEZVOUS").is_ok() || ONCE.is_completed() {
+        return;
+    }
+    ONCE.call_once(|| {});
+    tokio::spawn(async move {
+        let topic = rendezvous_topic();
+        let (mut last, mut at) = (None::<String>, std::time::Instant::now());
+        loop {
+            let cur = url.read().unwrap().clone();
+            if let Some(u) = &cur {
+                if last.as_deref() != Some(u.as_str()) || at.elapsed() > std::time::Duration::from_secs(25 * 60) {
+                    announce(&topic, &token, u).await;
+                    last = cur.clone();
+                    at = std::time::Instant::now();
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
 }
