@@ -152,6 +152,7 @@ fun MonitorScreen() {
 
     // ---- GPUs ----
     val gpus = d.optJSONArray("gpus")?.objs().orEmpty()
+    CpuDetailsSection(d)
     gpus.forEach { g -> GpuCard(g, hist) }
 
     // ---- memory ----
@@ -167,6 +168,7 @@ fun MonitorScreen() {
             Text("swap ${fmtBytes(su)} / ${fmtBytes(swapT)}", style = MaterialTheme.typography.bodySmall)
             Bar((su / swapT).toFloat(), heat((100 * su / swapT).toFloat()), height = 5.dp)
         }
+        MemoryDetails(d)
     }
 
     // ---- temperatures and fans ----
@@ -197,6 +199,11 @@ fun MonitorScreen() {
         }
     }
 
+    PowerSection(d, hist, gpus)
+    BatterySection(d)
+    PressureSection(d)
+    SensorsSection(d)
+
     // ---- network and disk I/O ----
     val net = d.getJSONObject("net")
     val io = d.getJSONObject("disk_io")
@@ -216,6 +223,7 @@ fun MonitorScreen() {
                 Text("▼ ${fmtRate(i.optDouble("rx_bps"))}  ▲ ${fmtRate(i.optDouble("tx_bps"))}", style = MaterialTheme.typography.labelMedium, fontFamily = FontFamily.Monospace)
             }
         }
+        WifiLine(d)
     }
     Section("Disk I/O (all disks)") {
         Chart(listOf(hist.series("dr"), hist.series("dw")), listOf(rxColor, txColor), { fmtRate(it.toDouble()) })
@@ -227,6 +235,7 @@ fun MonitorScreen() {
     }
 
     DisksSection(d, hist)
+    SystemDetailsSection(d)
 
     Processes(d.optJSONObject("procs")?.optInt("count") ?: 0, scope)
 }
@@ -285,9 +294,10 @@ private fun GpuCard(g: JSONObject, hist: HistView) {
 
 @Composable
 private fun Processes(count: Int, scope: CoroutineScope) {
-    var sort by remember { mutableStateOf("cpu") }
-    var desc by remember { mutableStateOf(true) }
-    var q by remember { mutableStateOf("") }
+    var sort by remember { mutableStateOf(Hc.memStr("proc.sort", "cpu")) }
+    var desc by remember { mutableStateOf(Hc.memBool("proc.desc", true)) }
+    var q by remember { mutableStateOf(Hc.memStr("proc.q")) }
+    LaunchedEffect(sort, desc, q) { Hc.memPutStr("proc.sort", sort); Hc.memPutBool("proc.desc", desc); Hc.memPutStr("proc.q", q) }
     var limit by remember { mutableIntStateOf(40) }
     var selected by remember { mutableStateOf<JSONObject?>(null) }
     val res = loaded(listOf(sort, desc, q, limit), (Hc.speedMs * 2).coerceIn(1000, 10000).toLong()) {

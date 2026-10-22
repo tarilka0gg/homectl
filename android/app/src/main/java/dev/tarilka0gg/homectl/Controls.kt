@@ -41,12 +41,14 @@ fun ControlsScreen() {
                 SwitchRow(it.str("title"), it.optBoolean("on"), if (it.optBoolean("on")) "${it.optInt("percent")}% brightness" else "off (backlight at 0)") { on ->
                     act(1200) { Hc.post("/api/displays/internal/${if (on) "on" else "off"}") }
                 }
+                if (it.optBoolean("on") && !it.isNull("percent")) SliderRow("Brightness", it.optInt("percent").toFloat(), 100f, 1f) { v -> scope.launch { Hc.post("/api/brightness", body("percent" to v)) } }
             }
             externals.forEach { e ->
                 val known = !e.isNull("on")
                 SwitchRow(e.str("title"), e.optBoolean("on"), if (known) e.str("detail") else "${e.str("detail")} · not answering", enabled = true) { on ->
                     act(3000) { Hc.post("/api/displays/${e.str("id")}/${if (on) "on" else "off"}?compositor=$comp") }
                 }
+                if (e.optBoolean("on") && !e.isNull("percent")) SliderRow("Brightness", e.optInt("percent").toFloat(), 100f, 0f) { v -> scope.launch { Hc.post("/api/monitors/${e.str("id")}/brightness", body("percent" to v)) } }
             }
             if (externals.isNotEmpty() && d.optBoolean("compositor")) {
                 SwitchRow("Also disable it in the compositor", Hc.compositorOff, "frees the GPU from driving a dark screen so it can sleep") { Hc.updateCompositorOff(it) }
@@ -131,7 +133,8 @@ fun ControlsScreen() {
         recording.forEach { s -> AppStream(s, "recording", ::act) }
     }
 
-    Section("Display") {
+    val extNoBrightness = disp.value?.optJSONArray("external")?.objs().orEmpty().any { !it.has("percent") }
+    if (disp.value == null || extNoBrightness) Section("Display") {
         bri.value?.takeIf { !it.isNull("percent") }?.let { b ->
             SliderRow("Laptop screen", b.optInt("percent", 50).toFloat(), 100f, 1f) { v -> scope.launch { Hc.post("/api/brightness", body("percent" to v)) } }
         }

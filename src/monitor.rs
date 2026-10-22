@@ -573,6 +573,7 @@ pub fn start() -> Monitor {
         let users = passwd();
         let mut gpus = find_gpus();
         let mut hist = Hist::default();
+        let mut extra = crate::sensors::Sensors::new();
         let mut prev_cpu = cpu_times();
         let core_ids = core_id_map(prev_cpu.len().saturating_sub(1));
         let mut prev_net: HashMap<String, (u64, u64)> = net_ifaces().into_iter().map(|i| (i.name, (i.rx, i.tx))).collect();
@@ -734,6 +735,10 @@ pub fn start() -> Monitor {
             let gpu_json: Vec<Value> = gpus.iter_mut().map(|g| sample_gpu(g, ac, forced, pkg_temp)).collect();
 
             hist.tick += 1;
+            let ex = extra.sample();
+            if let Some(w) = ex["power"]["rapl"].as_array().and_then(|a| a.first()).and_then(|z| z["w"].as_f64()) {
+                hist.push("power.pkg", Some(w));
+            }
             hist.push("cpu", Some(total));
             for (i, c) in pct.iter().skip(1).enumerate() {
                 hist.push(&format!("core.{i}"), Some(*c));
@@ -781,6 +786,10 @@ pub fn start() -> Monitor {
                 "core_history": hist.cores_json(pct.len().saturating_sub(1)),
                 "sample_ms": interval,
             });
+            let mut snapshot = snapshot;
+            if let Some(o) = snapshot.as_object_mut() {
+                o.extend(ex);
+            }
             *out.snapshot.write().unwrap() = snapshot;
         }
     });

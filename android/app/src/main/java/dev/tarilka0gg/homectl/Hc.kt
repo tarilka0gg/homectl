@@ -281,6 +281,14 @@ object Hc {
 
     fun setSpeed(ms: Int) { speedMs = ms; prefs.edit().putInt("speed", ms).apply() }
     fun setPerCore(v: Boolean) { perCoreGraphs = v; prefs.edit().putBoolean("percore", v).apply() }
+    // ---- what the screens remember (where you were), kept across leaving the app ----
+    fun memInt(k: String, def: Int = 0) = if (::prefs.isInitialized) prefs.getInt("m.$k", def) else def
+    fun memPutInt(k: String, v: Int) { if (::prefs.isInitialized) prefs.edit().putInt("m.$k", v).apply() }
+    fun memStr(k: String, def: String = "") = if (::prefs.isInitialized) prefs.getString("m.$k", def) ?: def else def
+    fun memPutStr(k: String, v: String) { if (::prefs.isInitialized) prefs.edit().putString("m.$k", v).apply() }
+    fun memBool(k: String, def: Boolean = false) = if (::prefs.isInitialized) prefs.getBoolean("m.$k", def) else def
+    fun memPutBool(k: String, v: Boolean) { if (::prefs.isInitialized) prefs.edit().putBoolean("m.$k", v).apply() }
+
     fun setTab(i: Int) { lastTab = i; prefs.edit().putInt("tab", i).apply() }
 
     val paired get() = machines.isNotEmpty()

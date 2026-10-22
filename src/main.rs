@@ -8,6 +8,7 @@ mod monitor;
 mod net;
 mod pair;
 mod relay;
+mod sensors;
 mod swr;
 mod sys;
 mod term;
@@ -572,6 +573,8 @@ async fn main() {
         .route("/fs/thumb", get(fs::thumb))
         .route("/fs/search", get(fs::search))
         .route("/fs/usage", get(fs::usage))
+        .route("/fs/stat", get(fs::stat))
+        .route("/fs/hash", get(fs::hash))
         .route("/fs/delete", post(fs::delete))
         .route("/fs/rename", post(fs::rename))
         .route("/fs/write", post(fs::write))

@@ -133,7 +133,7 @@ pub async fn monitor_brightness_get(display: u8) -> Option<u8> {
 }
 
 pub async fn monitor_brightness_set(display: u8, percent: u8) -> bool {
-    ok("ddcutil", &["--display", &display.to_string(), "setvcp", "10", &percent.min(100).to_string()]).await
+    ok("ddcutil", &["--display", &display.to_string(), "setvcp", "10", &percent.min(100).to_string(), "--noverify"]).await
 }
 
 // ---- clipboard (Wayland) ----

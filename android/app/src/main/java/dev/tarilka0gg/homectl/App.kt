@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
 import android.widget.Toast
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -18,6 +19,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -34,6 +37,21 @@ fun App() {
     var adding by remember { mutableStateOf(!Hc.paired) }
     if (adding || !Hc.paired) return AddMachineScreen(canCancel = Hc.paired) { adding = false }
     var tab by remember { mutableStateOf(Tab.entries.getOrElse(Hc.lastTab) { Tab.Monitor }) }
+    // each tab keeps its scroll position while you move between tabs, and across leaving the app
+    val scrolls = remember { Tab.entries.associateWith { ScrollState(Hc.memInt("scroll.${it.name}")) } }
+    val restored = remember { mutableStateMapOf<Tab, Boolean>() }
+    LaunchedEffect(tab) {
+        val st = scrolls[tab] ?: return@LaunchedEffect
+        if (tab == Tab.Terminal || tab == Tab.Files) return@LaunchedEffect
+        if (restored[tab] != true) {
+            val want = Hc.memInt("scroll.${tab.name}")
+            var tries = 0
+            while (st.maxValue < want && tries++ < 40) delay(100) // the content arrives a moment after launch
+            st.scrollTo(want.coerceAtMost(st.maxValue))
+            restored[tab] = true
+        }
+        snapshotFlow { st.value }.collectLatest { v -> delay(300); Hc.memPutInt("scroll.${tab.name}", v) }
+    }
     var menu by remember { mutableStateOf(false) }
     val m = Hc.cur!!
     LaunchedEffect(Hc.openPath) { if (Hc.openPath != null) { tab = Tab.Files; Hc.setTab(Tab.Files.ordinal) } }
@@ -79,7 +97,7 @@ fun App() {
         if (tab == Tab.Terminal || tab == Tab.Files) {
             Box(Modifier.padding(pad).fillMaxSize()) { if (tab == Tab.Terminal) TerminalScreen() else FilesScreen() }
         } else {
-            Column(Modifier.padding(pad).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.padding(pad).fillMaxSize().verticalScroll(scrolls.getValue(tab)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 when (tab) {
                     Tab.Monitor -> MonitorScreen()
                     Tab.Controls -> ControlsScreen()

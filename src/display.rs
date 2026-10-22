@@ -92,7 +92,9 @@ pub async fn list() -> Value {
     let mut ext = vec![];
     for (n, connector, model) in detect(false).await {
         let on = ext_on(n).await;
-        ext.push(json!({"id": n.to_string(), "title": if model.is_empty() { format!("External monitor ({})", if connector.is_empty() { n.to_string() } else { connector.clone() }) } else { model }, "detail": connector, "on": on}));
+        // brightness only when the monitor is awake and answering DDC
+        let percent = if on == Some(true) { crate::ctl::monitor_brightness_get(n as u8).await } else { None };
+        ext.push(json!({"id": n.to_string(), "title": if model.is_empty() { format!("External monitor ({})", if connector.is_empty() { n.to_string() } else { connector.clone() }) } else { model }, "detail": connector, "on": on, "percent": percent}));
     }
     json!({"internal": internal, "external": ext, "compositor": niri_available()})
 }

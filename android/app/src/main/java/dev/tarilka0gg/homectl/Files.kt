@@ -35,6 +35,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.lazy.rememberLazyListState
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.text.DateFormat
@@ -65,7 +69,7 @@ private object ListCache {
 
 /** One row of a folder listing or of search results ([where] = the folder, shown for search hits). */
 @Composable
-private fun FileRow(m: Machine, rf: RemoteFile, dir: Boolean, link: Boolean, where: String?, onClick: () -> Unit, onLong: () -> Unit) {
+private fun FileRow(m: Machine, rf: RemoteFile, dir: Boolean, link: Boolean, where: String?, onClick: () -> Unit, onLong: () -> Unit, extra: String? = null) {
     Row(
         Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLong).padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -82,7 +86,27 @@ private fun FileRow(m: Machine, rf: RemoteFile, dir: Boolean, link: Boolean, whe
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (extra != null) Text(extra, style = MaterialTheme.typography.labelSmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
         }
+    }
+}
+
+/** Where you were in each folder, so coming back (even after closing the app) lands on the same spot. */
+private object FilePos {
+    private val map = LinkedHashMap<String, Pair<Int, Int>>()
+    private var loaded = false
+    private fun load() {
+        if (loaded) return
+        loaded = true
+        runCatching { JSONObject(Hc.memStr("files.pos", "{}")).let { o -> o.keys().forEach { k -> o.getString(k).split(',').let { a -> map[k] = a[0].toInt() to a[1].toInt() } } } }
+    }
+    fun get(k: String): Pair<Int, Int>? { load(); return map[k] }
+    fun put(k: String, index: Int, offset: Int) {
+        load()
+        map.remove(k)
+        map[k] = index to offset
+        while (map.size > 40) map.remove(map.keys.first())
+        Hc.memPutStr("files.pos", JSONObject(map.mapValues { "${it.value.first},${it.value.second}" }).toString())
     }
 }
 
@@ -92,11 +116,14 @@ fun FilesScreen() {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     // browsing history: back/forward like a browser (path null = the machine's home)
-    var hist by remember(m.id) { mutableStateOf(listOf<String?>(null)) }
+    var hist by remember(m.id) { mutableStateOf(listOf<String?>(Hc.memStr("files.path.${m.id}").ifBlank { null })) }
     var pos by remember(m.id) { mutableIntStateOf(0) }
     val path = hist[pos]
     fun go(p: String?) { hist = hist.take(pos + 1) + p; pos = hist.lastIndex }
-    var showHidden by remember { mutableStateOf(false) }
+    var showHidden by remember { mutableStateOf(Hc.memBool("files.hidden")) }
+    var showDetails by remember { mutableStateOf(Hc.memBool("files.details")) }
+    var details by remember { mutableStateOf<RemoteFile?>(null) }
+    val listState = rememberLazyListState()
     var reload by remember { mutableIntStateOf(0) }
     var progress by remember { mutableStateOf<Pair<String, Float>?>(null) }
     var sheet by remember { mutableStateOf<RemoteFile?>(null) }
@@ -117,6 +144,22 @@ fun FilesScreen() {
     val cur = listing.value?.str("path") ?: path ?: ""
     val parent = listing.value?.takeIf { !it.isNull("parent") }?.str("parent")
     val home = listing.value?.str("home").orEmpty()
+    LaunchedEffect(path) { Hc.memPutStr("files.path.${m.id}", path.orEmpty()) }
+    val posKey = "${m.id}|$reqKey"
+    var restoredFor by remember { mutableStateOf<String?>(null) }
+    val haveListing = listing.value != null
+    LaunchedEffect(posKey, haveListing) {
+        if (!haveListing) return@LaunchedEffect
+        val p = FilePos.get(posKey)
+        listState.scrollToItem(p?.first ?: 0, p?.second ?: 0)
+        restoredFor = posKey
+    }
+    LaunchedEffect(posKey) {
+        snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }.collectLatest { (i, o) ->
+            delay(300)
+            if (restoredFor == posKey && !searching) FilePos.put(posKey, i, o)
+        }
+    }
     fun full(name: String) = if (cur == "/") "/$name" else "$cur/$name"
 
     fun back() { if (pos > 0) pos-- else if (parent != null && cur != home) go(parent) }
@@ -195,6 +238,7 @@ fun FilesScreen() {
             // swipe right = back, swipe left = forward (system back gesture works too)
             detectHorizontalDragGestures(onDragStart = { swipe = 0f }, onDragEnd = { if (swipe > 160f) back() else if (swipe < -160f) forward() }) { _, dx -> swipe += dx }
         },
+        state = listState,
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
@@ -241,7 +285,8 @@ fun FilesScreen() {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilledTonalButton({ picker.launch("*/*") }) { Text("Upload here") }
                 OutlinedButton({ mkdir = true }) { Text("New folder") }
-                FilterChip(showHidden, { showHidden = !showHidden }, label = { Text("Hidden files") })
+                FilterChip(showHidden, { showHidden = !showHidden; Hc.memPutBool("files.hidden", showHidden) }, label = { Text("Hidden files") })
+                FilterChip(showDetails, { showDetails = !showDetails; Hc.memPutBool("files.details", showDetails) }, label = { Text("Details") })
             }
         }
         progress?.let { (n, f) ->
@@ -272,7 +317,8 @@ fun FilesScreen() {
                 val dir = e.optBoolean("dir")
                 val name = e.str("name")
                 val rf = RemoteFile(name, full(name), e.optLong("size"), e.optLong("mtime"))
-                FileRow(m, rf, dir, e.optBoolean("link"), null, onClick = { if (dir) go(full(name)) else open(rf) }, onLong = { sheet = rf.copy(dir = dir) })
+                FileRow(m, rf, dir, e.optBoolean("link"), null, onClick = { if (dir) go(full(name)) else open(rf) }, onLong = { sheet = rf.copy(dir = dir) },
+                    extra = if (showDetails) listOf(e.str("perms"), e.str("owner")).filter { it.isNotBlank() }.joinToString(" · ") else null)
             }
         }
     }
@@ -285,6 +331,7 @@ fun FilesScreen() {
             Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(f.name, style = MaterialTheme.typography.titleMedium)
                 Text((if (f.dir) "" else "${fmtBytes(f.size.toDouble())} · ") + f.path, style = MaterialTheme.typography.bodySmall)
+                ListItem({ Text("Details") }, Modifier.combinedClickable(onClick = { sheet = null; details = f }))
                 if (f.dir) ListItem({ Text("Open folder") }, Modifier.combinedClickable(onClick = { sheet = null; searching = false; query = ""; go(f.path) }))
                 else {
                     ListItem({ Text(if (f.kind == Kind.Archive) "Look inside / unzip" else "Preview") }, Modifier.combinedClickable(onClick = { sheet = null; open(f) }))
@@ -371,6 +418,7 @@ fun FilesScreen() {
             dismissButton = { TextButton({ deleting = null }) { Text("Cancel") } },
         )
     }
+    details?.let { DetailsDialog(m, it) { details = null } }
     if (mkdir) {
         var name by remember { mutableStateOf("") }
         AlertDialog(

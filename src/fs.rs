@@ -8,7 +8,7 @@ use axum::{
 };
 use futures_util::StreamExt;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{os::unix::fs::MetadataExt, path::PathBuf};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
@@ -35,12 +35,21 @@ pub async fn list(Query(q): Query<PathQ>) -> Response {
     let Ok(p) = tokio::fs::canonicalize(&p).await else { return StatusCode::NOT_FOUND.into_response() };
     let Ok(mut rd) = tokio::fs::read_dir(&p).await else { return StatusCode::FORBIDDEN.into_response() };
     let mut entries = vec![];
+    let owners: std::collections::HashMap<u32, String> = std::fs::read_to_string("/etc/passwd")
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(':').collect();
+            Some((f.get(2)?.parse().ok()?, f[0].to_string()))
+        })
+        .collect();
     while let Ok(Some(e)) = rd.next_entry().await {
         let name = e.file_name().to_string_lossy().into_owned();
         let Ok(lm) = e.metadata().await else { continue };
         let link = lm.file_type().is_symlink();
         let m = if link { tokio::fs::metadata(e.path()).await.unwrap_or(lm) } else { lm };
-        entries.push(json!({"name": name, "dir": m.is_dir(), "link": link, "size": if m.is_dir() { 0 } else { m.len() }, "mtime": m.mtime(), "hidden": name.starts_with('.')}));
+        entries.push(json!({"name": name, "dir": m.is_dir(), "link": link, "size": if m.is_dir() { 0 } else { m.len() }, "mtime": m.mtime(), "hidden": name.starts_with('.'),
+            "perms": rwx(m.mode(), if link { 'l' } else if m.is_dir() { 'd' } else { '-' }), "owner": owners.get(&m.uid()).cloned().unwrap_or_else(|| m.uid().to_string())}));
     }
     // dirs first, then names A→Z
     entries.sort_by(|a, b| b["dir"].as_bool().cmp(&a["dir"].as_bool()).then_with(|| a["name"].as_str().map(str::to_lowercase).cmp(&b["name"].as_str().map(str::to_lowercase))));
@@ -588,5 +597,148 @@ pub async fn write(Json(r): Json<WriteReq>) -> Response {
         Ok(Ok(mtime)) => Json(json!({"mtime": mtime})).into_response(),
         Ok(Err((code, e))) => (code, Json(json!({ "error": e }))).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+fn name_of(file: &str, id: u32) -> String {
+    std::fs::read_to_string(file)
+        .ok()
+        .and_then(|t| t.lines().find_map(|l| {
+            let f: Vec<&str> = l.split(':').collect();
+            (f.len() > 2 && f[2].parse::<u32>().ok() == Some(id)).then(|| f[0].to_string())
+        }))
+        .unwrap_or_else(|| id.to_string())
+}
+
+fn rwx(mode: u32, kind: char) -> String {
+    let b = |bit: u32, c: char| if mode & bit != 0 { c } else { '-' };
+    let x = |bit: u32, special: u32, lower: char, upper: char| match (mode & bit != 0, mode & special != 0) {
+        (true, true) => lower,
+        (false, true) => upper,
+        (true, false) => 'x',
+        _ => '-',
+    };
+    format!(
+        "{kind}{}{}{}{}{}{}{}{}{}",
+        b(0o400, 'r'), b(0o200, 'w'), x(0o100, 0o4000, 's', 'S'),
+        b(0o040, 'r'), b(0o020, 'w'), x(0o010, 0o2000, 's', 'S'),
+        b(0o004, 'r'), b(0o002, 'w'), x(0o001, 0o1000, 't', 'T'),
+    )
+}
+
+/// Everything worth knowing about one file or folder (what `stat` + `file` + a peek inside would say).
+pub async fn stat(Query(q): Query<PathQ>) -> Response {
+    let p = resolve(q.path.as_deref());
+    let Ok(lm) = tokio::fs::symlink_metadata(&p).await else { return StatusCode::NOT_FOUND.into_response() };
+    let is_link = lm.file_type().is_symlink();
+    let target = if is_link { tokio::fs::read_link(&p).await.ok().map(|t| t.display().to_string()) } else { None };
+    let m = if is_link { tokio::fs::metadata(&p).await.unwrap_or(lm.clone()) } else { lm.clone() };
+    let kind = if m.is_dir() { "folder" } else if m.is_file() { "file" } else { "special" };
+    let kind_char = if is_link { 'l' } else if m.is_dir() { 'd' } else if m.is_file() { '-' } else { 's' };
+    let mut j = json!({
+        "path": p.display().to_string(),
+        "name": p.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()),
+        "kind": kind,
+        "link": target,
+        "size": if m.is_dir() { Value::Null } else { json!(m.len()) },
+        "on_disk": m.blocks() * 512,
+        "mode": format!("{:04o}", m.mode() & 0o7777),
+        "perms": rwx(m.mode(), kind_char),
+        "owner": name_of("/etc/passwd", m.uid()),
+        "group": name_of("/etc/group", m.gid()),
+        "uid": m.uid(), "gid": m.gid(),
+        "links": m.nlink(),
+        "inode": m.ino(),
+        "mtime": m.mtime(),
+        "atime": m.atime(),
+        "ctime": m.ctime(),
+        "birth": m.created().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
+        "hidden": p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')),
+    });
+    if m.is_dir() {
+        let mut files = 0u64;
+        let mut dirs = 0u64;
+        let mut links = 0u64;
+        let mut newest = 0i64;
+        if let Ok(mut rd) = tokio::fs::read_dir(&p).await {
+            while let Ok(Some(e)) = rd.next_entry().await {
+                if let Ok(t) = e.file_type().await {
+                    if t.is_dir() { dirs += 1 } else if t.is_symlink() { links += 1 } else { files += 1 }
+                }
+                if let Ok(em) = e.metadata().await {
+                    newest = newest.max(em.mtime());
+                }
+            }
+        }
+        j["items"] = json!({"files": files, "folders": dirs, "links": links, "newest": newest});
+    } else if m.is_file() {
+        let pp = p.clone();
+        let extra = tokio::task::spawn_blocking(move || {
+            let mut o = serde_json::Map::new();
+            if let Ok(out) = std::process::Command::new("file").args(["-b", "--mime-type", "--"]).arg(&pp).output() {
+                let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !t.is_empty() {
+                    o.insert("mime".into(), json!(t));
+                }
+            }
+            if let Ok(out) = std::process::Command::new("file").args(["-b", "--"]).arg(&pp).output() {
+                let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !t.is_empty() {
+                    o.insert("description".into(), json!(t.chars().take(200).collect::<String>()));
+                }
+            }
+            if let Ok(r) = image::ImageReader::open(&pp).and_then(|r| r.with_guessed_format()) {
+                if let Ok((w, h)) = r.into_dimensions() {
+                    o.insert("image".into(), json!({"width": w, "height": h}));
+                }
+            }
+            // lines + words of reasonably small text files
+            if let Ok(meta) = std::fs::metadata(&pp) {
+                if meta.len() <= 8 << 20 {
+                    if let Ok(b) = std::fs::read(&pp) {
+                        if !b.iter().take(8192).any(|c| *c == 0) {
+                            let lines = b.iter().filter(|c| **c == b'\n').count() + usize::from(!b.is_empty() && b.last() != Some(&b'\n'));
+                            let words = String::from_utf8_lossy(&b).split_whitespace().count();
+                            o.insert("text".into(), json!({"lines": lines, "words": words, "crlf": b.windows(2).any(|w| w == b"\r\n")}));
+                        }
+                    }
+                }
+            }
+            o
+        })
+        .await
+        .unwrap_or_default();
+        for (k, v) in extra {
+            j[k] = v;
+        }
+    }
+    Json(j).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct HashQ {
+    path: String,
+    algo: Option<String>,
+}
+
+/// SHA-256 (default) / SHA-1 / MD5 of a file, computed by the system tools.
+pub async fn hash(Query(q): Query<HashQ>) -> Response {
+    let tool = match q.algo.as_deref().unwrap_or("sha256") {
+        "sha256" => "sha256sum",
+        "sha1" => "sha1sum",
+        "md5" => "md5sum",
+        _ => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let p = resolve(Some(&q.path));
+    if !tokio::fs::metadata(&p).await.is_ok_and(|m| m.is_file()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let run = tokio::process::Command::new(tool).arg("--").arg(&p).output();
+    match tokio::time::timeout(std::time::Duration::from_secs(300), run).await {
+        Ok(Ok(o)) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout);
+            Json(json!({"algo": q.algo.unwrap_or("sha256".into()), "hash": s.split_whitespace().next().unwrap_or("")})).into_response()
+        }
+        _ => err("Couldn't compute the checksum.".into()),
     }
 }
