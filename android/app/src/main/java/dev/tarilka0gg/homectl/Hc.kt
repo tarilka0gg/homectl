@@ -17,7 +17,11 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
-data class Endpoint(val kind: String, val url: String)
+/**
+ * One way to reach a machine. A "server" endpoint goes through another paired machine that relays to this one:
+ * [url] is `<hub>/peer/<id>`, [token] is the hub's token and [hub] is the hub machine's id (its address is refreshed on resolve).
+ */
+data class Endpoint(val kind: String, val url: String, val token: String? = null, val hub: String? = null)
 
 /**
  * One paired computer. Keeps every address it has reported (Tailscale, LAN, tunnel) and fails over between
@@ -30,7 +34,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
     var active by mutableStateOf<Endpoint?>(null)
     var offline by mutableStateOf(false)
 
-    private val order = listOf("tailscale", "lan", "tunnel")
+    private val order = listOf("tailscale", "lan", "server", "tunnel")
 
     private suspend fun ping(e: Endpoint): Boolean = withContext(Dispatchers.IO) {
         try {
@@ -45,6 +49,10 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
 
     /** Picks the best reachable address (Tailscale, then LAN, then tunnel) and refreshes the address list from it. */
     suspend fun resolve(): Endpoint? = coroutineScope {
+        endpoints = endpoints.map { e ->
+            val hub = e.hub?.let { id -> Hc.machines.find { it.id == id } }?.active?.url ?: return@map e
+            e.copy(url = hub + "/peer/" + e.url.substringAfterLast("/peer/"))
+        }
         val cands = endpoints.sortedBy { order.indexOf(it.kind).let { i -> if (i < 0) 99 else i } }
         val up = cands.map { e -> async { e to ping(e) } }.awaitAll().filter { it.second }.map { it.first }
         active = up.firstOrNull()
@@ -56,9 +64,9 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
     private suspend fun refreshEndpoints(via: Endpoint) {
         val j = raw(via, "GET", "/api/endpoints")?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return
         val a = j.optJSONArray("urls") ?: return
-        val fresh = (0 until a.length()).map { a.getJSONObject(it).let { o -> Endpoint(o.getString("kind"), o.getString("url")) } }
+        val fresh = (0 until a.length()).map { a.getJSONObject(it).let { o -> Endpoint(o.getString("kind"), o.getString("url"), o.optString("token").ifBlank { null }, o.optString("hub").ifBlank { null }) } }
         if (fresh.isNotEmpty()) {
-            endpoints = fresh
+            endpoints = fresh + endpoints.filter { it.kind == "server" } // keep relay routes the daemon doesn't know about
             name = j.optString("name", name).ifBlank { name }
             Hc.save()
         }
@@ -66,7 +74,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
 
     private suspend fun raw(e: Endpoint, method: String, path: String, body: String? = null): String? = withContext(Dispatchers.IO) {
         try {
-            val c = Net.open(e.url, method, path, token, 4000)
+            val c = Net.open(e.url, method, path, e.token ?: token, 4000)
             if (body != null) {
                 c.doOutput = true
                 c.setRequestProperty("Content-Type", "application/json")
@@ -102,7 +110,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         return withContext(Dispatchers.IO) {
             try {
                 val name = java.net.URLEncoder.encode(fileName, "UTF-8").replace("+", "%20")
-                val c = Net.open(e.url, "POST", "/api/files/$name", token, 5000)
+                val c = Net.open(e.url, "POST", "/api/files/$name", e.token ?: token, 5000)
                 c.doOutput = true
                 c.setChunkedStreamingMode(65536)
                 ctx.contentResolver.openInputStream(uri)!!.use { i -> c.outputStream.use { o -> i.copyTo(o) } }
@@ -117,7 +125,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
 
     /** WebSocket URL for terminal session [sid] on the active address. */
     fun termUrl(sid: String, shell: String? = null): String? =
-        active?.let { it.url.replaceFirst("http", "ws") + "/api/term?t=$token&s=$sid" + (shell?.let { sh -> "&sh=" + Uri.encode(sh) } ?: "") }
+        active?.let { it.url.replaceFirst("http", "ws") + "/api/term?t=${it.token ?: token}&s=$sid" + (shell?.let { sh -> "&sh=" + Uri.encode(sh) } ?: "") }
 
     suspend fun delete(path: String): Boolean = call("DELETE", path) != null
 
@@ -126,7 +134,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         val e = active ?: resolve() ?: return null
         return withContext(Dispatchers.IO) {
             try {
-                val c = Net.open(e.url, "GET", pathQuery, token, 6000)
+                val c = Net.open(e.url, "GET", pathQuery, e.token ?: token, 6000)
                 c.readTimeout = 60000
                 if (range != null) c.setRequestProperty("Range", range)
                 if (c.responseCode !in 200..299) { c.disconnect(); return@withContext null }
@@ -152,7 +160,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         val e = active ?: resolve() ?: return 0 to null
         return withContext(Dispatchers.IO) {
             try {
-                val c = Net.open(e.url, "POST", path, token, 6000)
+                val c = Net.open(e.url, "POST", path, e.token ?: token, 6000)
                 c.readTimeout = readTimeoutMs
                 c.doOutput = true
                 c.setRequestProperty("Content-Type", "application/json")
@@ -171,7 +179,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         val e = active ?: resolve() ?: return 0 to null
         return withContext(Dispatchers.IO) {
             try {
-                val c = Net.open(e.url, "GET", pathQuery, token, 6000)
+                val c = Net.open(e.url, "GET", pathQuery, e.token ?: token, 6000)
                 c.readTimeout = readTimeoutMs
                 val code = c.responseCode
                 val text = (if (code < 400) c.inputStream else c.errorStream)?.bufferedReader()?.readText().orEmpty()
@@ -188,7 +196,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         val e = active ?: resolve() ?: return false
         return withContext(Dispatchers.IO) {
             try {
-                val c = Net.open(e.url, "POST", "/api/fs/upload?dir=${Uri.encode(dir)}&name=${Uri.encode(fileName)}", token, 5000)
+                val c = Net.open(e.url, "POST", "/api/fs/upload?dir=${Uri.encode(dir)}&name=${Uri.encode(fileName)}", e.token ?: token, 5000)
                 c.doOutput = true
                 c.setChunkedStreamingMode(65536)
                 ctx.contentResolver.openInputStream(uri)!!.use { i -> c.outputStream.use { o -> i.copyTo(o) } }
@@ -282,13 +290,13 @@ object Hc {
     }
 
     private fun parseEndpoints(a: JSONArray) =
-        (0 until a.length()).map { a.getJSONObject(it).let { o -> Endpoint(o.getString("kind"), o.getString("url")) } }
+        (0 until a.length()).map { a.getJSONObject(it).let { o -> Endpoint(o.getString("kind"), o.getString("url"), o.optString("token").ifBlank { null }, o.optString("hub").ifBlank { null }) } }
 
     fun save() {
         val a = JSONArray()
         machines.forEach { m ->
             a.put(JSONObject().put("id", m.id).put("name", m.name).put("token", m.token).put("endpoints", JSONArray().also { ea ->
-                m.endpoints.forEach { ea.put(JSONObject().put("kind", it.kind).put("url", it.url)) }
+                m.endpoints.forEach { ea.put(JSONObject().put("kind", it.kind).put("url", it.url).put("token", it.token ?: "").put("hub", it.hub ?: "")) }
             }))
         }
         prefs.edit().putString("machines", a.toString()).putString("selected", selectedId).apply()
@@ -339,6 +347,30 @@ object Hc {
         if (token.isEmpty() || urls.isEmpty()) return false
         add(Machine(token.take(10), name, token, urls.map { Endpoint(kindOf(it), it.trimEnd('/')) }))
         return true
+    }
+
+    fun relayedVia(m: Machine, hub: Machine) = m.endpoints.any { it.hub == hub.id }
+
+    /** Makes [hub] (e.g. the home server) relay to [target], so the app can reach [target] through the hub alone. */
+    suspend fun linkViaServer(target: Machine, hub: Machine): Boolean {
+        val hubUrl = hub.active?.url ?: hub.resolve()?.url ?: return false
+        // the hub reaches the target by its own network (tailnet / LAN), not through us
+        val direct = target.endpoints.firstOrNull { it.kind == "tailscale" } ?: target.endpoints.firstOrNull { it.kind == "lan" } ?: return false
+        val peerId = target.id.filter { it.isLetterOrDigit() }.take(24)
+        val ok = hub.call("POST", "/api/peers", body("id" to peerId, "name" to target.name, "url" to direct.url, "token" to target.token)) != null
+        if (!ok) return false
+        target.endpoints = target.endpoints.filter { it.hub != hub.id } + Endpoint("server", "$hubUrl/peer/$peerId", hub.token, hub.id)
+        save()
+        target.resolve()
+        return true
+    }
+
+    suspend fun unlinkViaServer(target: Machine, hub: Machine) {
+        val peerId = target.id.filter { it.isLetterOrDigit() }.take(24)
+        hub.call("DELETE", "/api/peers/$peerId")
+        target.endpoints = target.endpoints.filter { it.hub != hub.id }
+        save()
+        target.resolve()
     }
 
     // The screens talk to the selected machine.

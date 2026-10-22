@@ -7,6 +7,7 @@ mod govee;
 mod monitor;
 mod net;
 mod pair;
+mod relay;
 mod sys;
 mod term;
 
@@ -29,13 +30,14 @@ use std::{
     },
 };
 
-struct App {
-    token: String,
+pub(crate) struct App {
+    pub(crate) token: String,
     inbox: PathBuf,
     port: u16,
     tunnel: net::TunnelUrl,
     tunnel_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    failures: AtomicU32,
+    pub(crate) failures: AtomicU32,
+    pub(crate) peers: relay::Peers,
     mon: monitor::Monitor,
     sessions: Arc<term::Sessions>,
     pairing: pair::Pairing,
@@ -63,11 +65,11 @@ fn load_token() -> String {
 }
 
 /// Compares without short-circuiting so response time doesn't leak how much of the token matched.
-fn token_eq(a: &str, b: &str) -> bool {
+pub(crate) fn token_eq(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-async fn slow_down(app: &App) {
+pub(crate) async fn slow_down(app: &App) {
     // The tunnel makes this reachable from the internet: slow down guessing as failures pile up.
     let n = app.failures.fetch_add(1, Ordering::Relaxed).min(20);
     tokio::time::sleep(std::time::Duration::from_millis(100 * n as u64)).await;
@@ -475,6 +477,7 @@ async fn main() {
         tunnel,
         tunnel_task: Mutex::new(tunnel_task),
         failures: AtomicU32::new(0),
+        peers: relay::Peers::load(config_dir()),
         mon: monitor::start(),
         sessions: Default::default(),
         pairing: Default::default(),
@@ -526,6 +529,8 @@ async fn main() {
         .route("/fs/archive/extract", post(fs::archive_extract))
         .route("/fs/archive/file", get(fs::archive_file))
         .route("/tunnel", get(tunnel_get).post(tunnel_post))
+        .route("/peers", get(relay::list).post(relay::upsert))
+        .route("/peers/{id}", axum::routing::delete(relay::remove))
         .layer(axum::extract::DefaultBodyLimit::disable())
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         .with_state(app.clone());
@@ -537,6 +542,7 @@ async fn main() {
         .route("/api/pair/confirm", post(pair_confirm))
         .route("/api/pair/pending", get(pair_pending))
         .route("/api/term", get(term_ws))
+        .route("/peer/{id}/{*rest}", axum::routing::any(relay::proxy).layer(axum::extract::DefaultBodyLimit::disable()))
         .with_state(app);
 
     let router = open.nest("/api", api);

@@ -391,7 +391,7 @@ private fun MediaViewer(m: Machine, f: RemoteFile) {
                     setOnErrorListener { _, _, _ -> failed = true; true }
                     setOnPreparedListener { it.isLooping = false; start() }
                     if (local != null) setVideoPath(local!!.path)
-                    else setVideoURI(android.net.Uri.parse(base + f.pathQuery), mapOf("Authorization" to "Bearer ${m.token}"))
+                    else setVideoURI(android.net.Uri.parse(base + f.pathQuery), mapOf("Authorization" to "Bearer ${m.active?.token ?: m.token}"))
                 }
             },
             modifier = Modifier.fillMaxSize(),

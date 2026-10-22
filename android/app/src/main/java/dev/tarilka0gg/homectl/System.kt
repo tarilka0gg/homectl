@@ -44,6 +44,33 @@ fun SystemScreen(onAddMachine: () -> Unit) {
         )
     }
 
+    if (m != null && Hc.machines.size > 1) {
+        val hubs = Hc.machines.filter { it.id != m.id }
+        Section("Reach ${m.name} through a server") {
+            Text(
+                "The app talks only to the server, and the server asks ${m.name} for everything (monitor, files, terminal). Works from anywhere the server is reachable; ${m.name} just has to be on while you use it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            hubs.forEach { h ->
+                val linked = Hc.relayedVia(m, h)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(h.name, style = MaterialTheme.typography.bodyLarge)
+                        Text(if (linked) "linked" else "not linked", style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (linked) OutlinedButton({ scope.launch { Hc.unlinkViaServer(m, h) } }) { Text("Unlink") }
+                    else FilledTonalButton({
+                        scope.launch {
+                            val ok = Hc.linkViaServer(m, h)
+                            Toast.makeText(ctx, if (ok) "${h.name} now relays to ${m.name}" else "Couldn't link — is ${h.name} updated and reachable, and does ${m.name} have a Tailscale or LAN address?", Toast.LENGTH_LONG).show()
+                        }
+                    }) { Text("Link") }
+                }
+            }
+        }
+    }
+
     var modesNonce by remember { mutableIntStateOf(0) }
     val modes = loaded(modesNonce, 6000) { Hc.array("/api/actions") }
     var modeConfirm by remember { mutableStateOf<Triple<JSONObject, Boolean, String>?>(null) }
