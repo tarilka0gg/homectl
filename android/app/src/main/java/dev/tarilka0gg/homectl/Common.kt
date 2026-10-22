@@ -84,14 +84,24 @@ fun SwitchRow(label: String, checked: Boolean, sub: String? = null, enabled: Boo
     }
 }
 
-/** Loads on entry and whenever [key] or the selected machine changes; polls every [everyMs] if > 0. */
+/** The last answer of each screen's data per machine, so coming back to a tab shows it at once while fresh data loads. */
+private object LastSeen {
+    val map = HashMap<String, Any>()
+}
+
+/**
+ * Loads on entry and whenever [key] or the selected machine changes; polls every [everyMs] if > 0.
+ * With a [cacheId] the previous result for this machine is shown immediately instead of an empty screen.
+ */
 @Composable
-fun <T> loaded(key: Any?, everyMs: Long = 0, fetch: suspend () -> T?): State<T?> {
+fun <T> loaded(key: Any?, everyMs: Long = 0, cacheId: String? = null, fetch: suspend () -> T?): State<T?> {
     val mid = Hc.cur?.id
-    val s = remember(mid) { mutableStateOf<T?>(null) }
+    val cacheKey = if (cacheId != null && mid != null) "$mid|$cacheId" else null
+    @Suppress("UNCHECKED_CAST")
+    val s = remember(mid) { mutableStateOf<T?>(cacheKey?.let { LastSeen.map[it] as? T }) }
     LaunchedEffect(key, mid) {
         do {
-            fetch()?.let { s.value = it }
+            fetch()?.let { s.value = it; if (cacheKey != null) LastSeen.map[cacheKey] = it }
             if (everyMs > 0) delay(everyMs)
         } while (everyMs > 0)
     }

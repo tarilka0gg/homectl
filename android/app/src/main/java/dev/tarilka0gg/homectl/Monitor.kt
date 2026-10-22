@@ -26,56 +26,63 @@ private val txColor = Color(0xFFFF9800)
 private val tempColor = Color(0xFFE53935)
 private val fanColors = listOf(Color(0xFF29B6F6), Color(0xFFAB47BC), Color(0xFF26A69A), Color(0xFFFFCA28))
 
+/** What the screen needs from the graph history, as plain lists (no JSON round-trips per poll). */
+class HistView(private val m: Map<String, List<Float>>, val cores: List<List<Float>>) {
+    fun series(k: String): List<Float> = m[k].orEmpty()
+}
+
 /**
  * Keeps each machine's graph history here and asks the machine only for samples newer than the last tick, so a poll is a
  * few KB instead of the whole history (85 KB with per-core graphs). Older daemons just send everything every time.
  */
-private object HistStore {
+object HistStore {
     private class Mem {
         var tick = 0L
         var cores = false
         val series = HashMap<String, ArrayList<Float>>()
-        var coreSeries: ArrayList<ArrayList<Float>>? = null
+        val coreSeries = ArrayList<ArrayList<Float>>()
     }
     private val mems = HashMap<String, Mem>()
     private const val KEEP = 120
 
     fun since(machine: String, wantCores: Boolean): Long = mems[machine]?.takeIf { it.cores == wantCores }?.tick ?: 0L
 
-    /** Folds [d] into the stored history and rewrites its `history` / `core_history` as the complete arrays. */
+    /** Folds [d] (a monitor reply) into the stored history. */
     fun merge(machine: String, d: JSONObject, wantCores: Boolean) {
         val m = mems.getOrPut(machine) { Mem() }
         val delta = d.optBoolean("hist_delta") && m.cores == wantCores
-        val h = d.optJSONObject("history")
-        if (!delta) { m.series.clear(); m.coreSeries = null }
-        h?.keys()?.forEach { k ->
-            val list = m.series.getOrPut(k) { ArrayList() }
-            val a = h.getJSONArray(k)
-            for (i in 0 until a.length()) list.add(a.getDouble(i).toFloat())
-            while (list.size > KEEP) list.removeAt(0)
+        if (!delta) { m.series.clear(); m.coreSeries.clear() }
+        d.optJSONObject("history")?.let { h ->
+            h.keys().forEach { k ->
+                val list = m.series.getOrPut(k) { ArrayList() }
+                val a = h.getJSONArray(k)
+                for (i in 0 until a.length()) list.add(a.getDouble(i).toFloat())
+                if (list.size > KEEP) list.subList(0, list.size - KEEP).clear()
+            }
         }
         d.optJSONArray("core_history")?.let { cores ->
-            val store = m.coreSeries ?: ArrayList<ArrayList<Float>>().also { m.coreSeries = it }
             for (c in 0 until cores.length()) {
-                if (store.size <= c) store.add(ArrayList())
+                if (m.coreSeries.size <= c) m.coreSeries.add(ArrayList())
+                val list = m.coreSeries[c]
                 val a = cores.getJSONArray(c)
-                for (i in 0 until a.length()) store[c].add(a.getDouble(i).toFloat())
-                while (store[c].size > KEEP) store[c].removeAt(0)
+                for (i in 0 until a.length()) list.add(a.getDouble(i).toFloat())
+                if (list.size > KEEP) list.subList(0, list.size - KEEP).clear()
             }
         }
         m.cores = wantCores
         m.tick = d.optLong("tick", 0L)
-        val full = JSONObject()
-        m.series.forEach { (k, v) -> full.put(k, org.json.JSONArray(v)) }
-        d.put("history", full)
-        if (wantCores) m.coreSeries?.let { cs -> d.put("core_history", org.json.JSONArray().also { arr -> cs.forEach { arr.put(org.json.JSONArray(it)) } }) }
-        d.remove("hist_delta")
+    }
+
+    /** A snapshot that stays valid while the stored lists keep growing. */
+    fun view(machine: String): HistView {
+        val m = mems[machine] ?: return HistView(emptyMap(), emptyList())
+        return HistView(m.series.mapValues { it.value.toList() }, m.coreSeries.map { it.toList() })
     }
 }
 
 @Composable
 fun MonitorScreen() {
-    val data = loaded(listOf(Hc.gpuLive, Hc.speedMs, Hc.perCoreGraphs), Hc.speedMs.coerceAtLeast(500).toLong()) {
+    val data = loaded(listOf(Hc.gpuLive, Hc.speedMs, Hc.perCoreGraphs), Hc.speedMs.coerceAtLeast(500).toLong(), "monitor") {
         val machine = Hc.cur?.id
         val cores = Hc.perCoreGraphs
         Hc.json("/api/monitor?every=${Hc.speedMs}" + (if (Hc.gpuLive) "&gpu=1" else "") + (if (cores) "&cores=1" else "") +
@@ -91,7 +98,7 @@ fun MonitorScreen() {
     val info = d.getJSONObject("info")
     val cpu = d.getJSONObject("cpu")
     val mem = d.optJSONObject("mem") ?: JSONObject()
-    val hist = d.getJSONObject("history")
+    val hist = HistStore.view(Hc.cur?.id.orEmpty())
     val primary = MaterialTheme.colorScheme.primary
     val tertiary = MaterialTheme.colorScheme.tertiary
 
@@ -121,23 +128,8 @@ fun MonitorScreen() {
             FilterChip(!Hc.perCoreGraphs, { Hc.setPerCore(false) }, label = { Text("Bars") })
             FilterChip(Hc.perCoreGraphs, { Hc.setPerCore(true) }, label = { Text("Graph per core") })
         }
-        val coreHist = d.optJSONArray("core_history")
-        if (Hc.perCoreGraphs && coreHist != null) {
-            cores.withIndex().chunked(2).forEach { pair ->
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    pair.forEach { (i, p) ->
-                        val t = coreTemps?.let { if (i < it.length() && !it.isNull(i)) it.getDouble(i) else null }
-                        Column(Modifier.weight(1f)) {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text("core $i", style = MaterialTheme.typography.labelSmall)
-                                Text("${p.toInt()}%" + (t?.let { " · ${it.toInt()}°" } ?: ""), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
-                            }
-                            Spark(listOf(coreHist.optJSONArray(i)?.floats().orEmpty()), listOf(heat(p)), max = 100f, height = 34.dp)
-                        }
-                    }
-                    if (pair.size == 1) Spacer(Modifier.weight(1f))
-                }
-            }
+        if (Hc.perCoreGraphs && hist.cores.isNotEmpty()) {
+            CoreGrid(hist.cores, cores, (0 until cores.size).map { i -> coreTemps?.let { if (i < it.length() && !it.isNull(i)) it.getDouble(i) else null } })
         } else cores.withIndex().chunked(2).forEach { pair ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 pair.forEach { (i, p) ->
@@ -240,7 +232,7 @@ fun MonitorScreen() {
 }
 
 @Composable
-private fun GpuCard(g: JSONObject, hist: JSONObject) {
+private fun GpuCard(g: JSONObject, hist: HistView) {
     val id = g.str("id")
     val live = g.optBoolean("live")
     val integrated = g.str("kind") == "integrated"

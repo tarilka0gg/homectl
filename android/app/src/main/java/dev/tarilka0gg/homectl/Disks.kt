@@ -29,7 +29,7 @@ private val busyColor = Color(0xFF29B6F6)
 
 /** One card per physical disk: live read/write, how busy it is, who is using it, and a way to see what fills each partition. */
 @Composable
-fun DisksSection(d: JSONObject, hist: JSONObject) {
+fun DisksSection(d: JSONObject, hist: HistView) {
     val devs = d.optJSONArray("disk_devs")?.objs().orEmpty()
     var usage by remember { mutableStateOf<Pair<String, String>?>(null) }
 

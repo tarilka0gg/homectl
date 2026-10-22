@@ -19,18 +19,18 @@ fun ControlsScreen() {
     /** Send a change, give the machine a moment, then re-read so every switch shows the real state. */
     fun act(delayMs: Long = 500, block: suspend () -> Unit) = scope.launch { block(); delay(delayMs); nonce++ }
 
-    val radios = loaded(nonce, 5000) { Hc.json("/api/radios") }
-    val wifi = loaded(nonce, 8000) { Hc.json("/api/wifi") }
-    val bt = loaded(nonce, 6000) { Hc.json("/api/bluetooth") }
-    val mixer = loaded(nonce, 4000) { Hc.json("/api/mixer") }
-    val bri = loaded(Unit) { Hc.json("/api/brightness") }
-    val mons = loaded(Unit) { Hc.array("/api/monitors") }
+    val radios = loaded(nonce, 5000, "ctl-radios") { Hc.json("/api/radios") }
+    val wifi = loaded(nonce, 8000, "ctl-wifi") { Hc.json("/api/wifi") }
+    val bt = loaded(nonce, 6000, "ctl-bt") { Hc.json("/api/bluetooth") }
+    val mixer = loaded(nonce, 4000, "ctl-mixer") { Hc.json("/api/mixer") }
+    val bri = loaded(Unit, 0, "ctl-bri") { Hc.json("/api/brightness") }
+    val mons = loaded(Unit, 0, "ctl-mons") { Hc.array("/api/monitors") }
     val cam = loaded(nonce, 10000) { Hc.array("/api/webcam/0") }
-    val tunnel = loaded(nonce, 6000) { Hc.json("/api/tunnel") }
+    val tunnel = loaded(nonce, 6000, "ctl-tunnel") { Hc.json("/api/tunnel") }
 
     LightsScreen()
 
-    val disp = loaded(nonce, 15000) { Hc.json("/api/displays") }
+    val disp = loaded(nonce, 15000, "ctl-disp") { Hc.json("/api/displays") }
     var allOffConfirm by remember { mutableStateOf(false) }
     disp.value?.let { d ->
         val internal = d.optJSONObject("internal")

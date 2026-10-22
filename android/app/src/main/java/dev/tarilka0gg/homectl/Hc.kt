@@ -7,6 +7,11 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -38,7 +43,8 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
 
     private suspend fun ping(e: Endpoint): Boolean = withContext(Dispatchers.IO) {
         try {
-            val c = Net.open(e.url, "GET", "/api/ping", null, 2500)
+            val c = Net.open(e.url, "GET", "/api/ping", null, 2500, connectMs = 1500)
+            c.readTimeout = 1500
             val ok = c.responseCode == 200 && c.inputStream.bufferedReader().readText().contains("homectl")
             ok
         } catch (_: Exception) {
@@ -46,18 +52,38 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         }
     }
 
-    /** Picks the best reachable address (Tailscale, then LAN, then tunnel) and refreshes the address list from it. */
-    suspend fun resolve(): Endpoint? = coroutineScope {
+    private val probes = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Picks the best reachable address (Tailscale, then LAN, then relay, then tunnel) and refreshes the address list
+     * from it. All addresses are probed at once, but it does not wait for dead ones: it returns as soon as the best
+     * address answers, or — when only a lower-priority one has answered — after a short grace period for better ones.
+     */
+    suspend fun resolve(): Endpoint? {
         endpoints = endpoints.map { e ->
             val hub = e.hub?.let { id -> Hc.machines.find { it.id == id } }?.active?.url ?: return@map e
             e.copy(url = hub + "/peer/" + e.url.substringAfterLast("/peer/"))
         }
         val cands = endpoints.sortedBy { order.indexOf(it.kind).let { i -> if (i < 0) 99 else i } }
-        val up = cands.map { e -> async { e to ping(e) } }.awaitAll().filter { it.second }.map { it.first }
-        active = up.firstOrNull()
+        val results = Channel<Pair<Int, Boolean>>(Channel.UNLIMITED)
+        cands.forEachIndexed { i, e -> probes.launch { results.trySend(i to ping(e)) } }
+        val status = arrayOfNulls<Boolean>(cands.size)
+        var firstOkAt = 0L
+        var pick: Int? = null
+        while (true) {
+            val best = status.indices.firstOrNull { status[it] != false } ?: break      // everything failed
+            if (status[best] == true) { pick = best; break }
+            val anyOk = status.indexOfFirst { it == true }
+            val wait = if (anyOk >= 0) (firstOkAt + 300 - System.currentTimeMillis()).coerceAtLeast(0) else Long.MAX_VALUE
+            val r = withTimeoutOrNull(wait) { results.receive() }
+            if (r == null) { pick = anyOk; break }
+            status[r.first] = r.second
+            if (r.second && firstOkAt == 0L) firstOkAt = System.currentTimeMillis()
+        }
+        active = pick?.let { cands[it] }
         offline = active == null
         active?.let { refreshEndpoints(it) }
-        active
+        return active
     }
 
     private suspend fun refreshEndpoints(via: Endpoint) {
@@ -73,7 +99,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
 
     private suspend fun raw(e: Endpoint, method: String, path: String, body: String? = null): String? = withContext(Dispatchers.IO) {
         try {
-            val c = Net.open(e.url, method, path, e.token ?: token, 4000)
+            val c = Net.open(e.url, method, path, e.token ?: token, 4000, connectMs = 2000)
             if (body != null) {
                 c.doOutput = true
                 c.setRequestProperty("Content-Type", "application/json")
@@ -207,10 +233,10 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
 }
 
 object Net {
-    fun open(base: String, method: String, path: String, token: String?, ms: Int): HttpURLConnection =
+    fun open(base: String, method: String, path: String, token: String?, ms: Int, connectMs: Int = ms): HttpURLConnection =
         (URL(base + path).openConnection() as HttpURLConnection).apply {
             requestMethod = method
-            connectTimeout = ms
+            connectTimeout = connectMs
             readTimeout = ms * 2
             if (token != null) setRequestProperty("Authorization", "Bearer $token")
         }

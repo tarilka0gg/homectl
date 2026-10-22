@@ -72,7 +72,7 @@ fun SystemScreen(onAddMachine: () -> Unit) {
     }
 
     var modesNonce by remember { mutableIntStateOf(0) }
-    val modes = loaded(modesNonce, 6000) { Hc.array("/api/actions") }
+    val modes = loaded(modesNonce, 6000, "sys-modes") { Hc.array("/api/actions") }
     var modeConfirm by remember { mutableStateOf<Triple<JSONObject, Boolean, String>?>(null) }
     var modeResult by remember { mutableStateOf<Pair<String, JSONObject>?>(null) }
     var modeBusy by remember { mutableStateOf(setOf<String>()) }
@@ -166,7 +166,7 @@ fun SystemScreen(onAddMachine: () -> Unit) {
     }
 
     var nonce by remember { mutableIntStateOf(0) }
-    val svc = loaded(nonce, 6000) { Hc.array("/api/services") }
+    val svc = loaded(nonce, 6000, "sys-svc") { Hc.array("/api/services") }
     var filter by remember { mutableStateOf("") }
     Section("Services") {
         OutlinedTextField(filter, { filter = it }, Modifier.fillMaxWidth(), label = { Text("Filter") }, singleLine = true)
