@@ -18,6 +18,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import android.widget.Toast
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 private val readColor = Color(0xFF4CAF50)
@@ -87,12 +90,16 @@ private fun PartRow(p: JSONObject, onOpen: (String) -> Unit) {
     }
 }
 
-/** Biggest folders under [start], drill down by tapping. */
+/** Biggest folders and files under [start]: tap a folder to look inside, open it in Files, or delete it. */
 @Composable
 private fun UsageDialog(start: String, onClose: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     var path by remember { mutableStateOf(start) }
     var r by remember { mutableStateOf<JSONObject?>(null) }
-    // folder scans can take a while on big disks: use the long-timeout request
+    var removed by remember(path) { mutableStateOf(setOf<String>()) }
+    var confirm by remember { mutableStateOf<JSONObject?>(null) }
+    var deleting by remember { mutableStateOf(false) }
     LaunchedEffect(path) {
         r = null
         val (code, j) = Hc.cur?.getSlow("/api/fs/usage?path=" + android.net.Uri.encode(path)) ?: (0 to null)
@@ -100,6 +107,11 @@ private fun UsageDialog(start: String, onClose: () -> Unit) {
     }
     val up = path.trimEnd('/').substringBeforeLast('/', "").ifEmpty { "/" }
     val canUp = path != start && path != "/"
+
+    fun openInFiles(p: String, isDir: Boolean) {
+        Hc.openPath = if (isDir) p else p.substringBeforeLast('/').ifEmpty { "/" }
+        onClose()
+    }
 
     // Back gesture / outside tap = one level up first, close at the top (a Dialog has its own back handling)
     Dialog(onDismissRequest = { if (canUp) path = up else onClose() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
@@ -111,39 +123,74 @@ private fun UsageDialog(start: String, onClose: () -> Unit) {
                         Text("What takes space", style = MaterialTheme.typography.titleSmall)
                         Text(path, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                    TextButton({ openInFiles(path, true) }) { Text("Open") }
                     IconButton(onClose) { Icon(Icons.Default.Close, "Close") }
                 }
                 HorizontalDivider()
-                if (r == null) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                val cur = r
+                when {
+                    cur == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             CircularProgressIndicator()
-                            Text("Measuring folders…", style = MaterialTheme.typography.bodySmall)
+                            Text("Measuring…", style = MaterialTheme.typography.bodySmall)
                         }
                     }
-                } else if (r!!.optBoolean("failed")) {
-                    Text("Couldn't measure this folder (no access?).", Modifier.padding(24.dp), color = MaterialTheme.colorScheme.error)
-                } else {
-                    val entries = r!!.optJSONArray("entries")?.objs().orEmpty()
-                    val top = entries.maxOfOrNull { it.optDouble("size") }?.coerceAtLeast(1.0) ?: 1.0
-                    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (r!!.optBoolean("partial")) item { Text("Took too long — sizes are partial.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-                        items(entries, key = { it.str("path") }) { e ->
-                            Column(Modifier.fillMaxWidth().clickable { path = e.str("path") }, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                    Text("📁 " + e.str("name"), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                                    Text(fmtBytes(e.optDouble("size")), style = MaterialTheme.typography.labelLarge)
+                    cur.optBoolean("failed") -> Text("Couldn't measure this folder (no access?).", Modifier.padding(24.dp), color = MaterialTheme.colorScheme.error)
+                    else -> {
+                        val entries = cur.optJSONArray("entries")?.objs().orEmpty().filter { it.str("path") !in removed }
+                        val top = entries.maxOfOrNull { it.optDouble("size") }?.coerceAtLeast(1.0) ?: 1.0
+                        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            item {
+                                Text(
+                                    "${fmtBytes(cur.optDouble("total"))} in ${cur.optLong("ms") / 1000.0} s" + if (cur.optBoolean("partial")) " (partial — took too long)" else "",
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            if (entries.isEmpty()) item { Text("Nothing here.", style = MaterialTheme.typography.bodyMedium) }
+                            items(entries, key = { it.str("path") }) { e ->
+                                val dir = e.optBoolean("dir")
+                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                    Column(
+                                        Modifier.weight(1f).clickable { if (dir) path = e.str("path") else openInFiles(e.str("path"), false) }.padding(vertical = 4.dp),
+                                        verticalArrangement = Arrangement.spacedBy(3.dp),
+                                    ) {
+                                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                            Text((if (dir) "📁 " else "📄 ") + e.str("name"), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                            Text(fmtBytes(e.optDouble("size")), style = MaterialTheme.typography.labelLarge)
+                                        }
+                                        Bar((e.optDouble("size") / top).toFloat(), MaterialTheme.colorScheme.primary)
+                                    }
+                                    TextButton({ openInFiles(e.str("path"), dir) }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Open") }
+                                    IconButton({ confirm = e }) { Icon(Icons.Default.Delete, "Delete", tint = MaterialTheme.colorScheme.error) }
                                 }
-                                Bar((e.optDouble("size") / top).toFloat(), MaterialTheme.colorScheme.primary)
                             }
                         }
-                        if (r!!.optLong("files_here") > 0) item {
-                            Text("Files directly in this folder: ${fmtBytes(r!!.optDouble("files_here"))}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        if (entries.isEmpty()) item { Text("No subfolders.", style = MaterialTheme.typography.bodyMedium) }
                     }
                 }
             }
         }
+    }
+
+    confirm?.let { e ->
+        AlertDialog(
+            onDismissRequest = { if (!deleting) confirm = null },
+            title = { Text("Delete ${e.str("name")}?") },
+            text = { Text("${e.str("path")}\n\n${fmtBytes(e.optDouble("size"))} will be removed from ${Hc.cur?.name}. This can't be undone.") },
+            confirmButton = {
+                TextButton({
+                    deleting = true
+                    scope.launch {
+                        val (code, j) = Hc.cur?.postSlow("/api/fs/delete", body("path" to e.str("path")), 600_000) ?: (0 to null)
+                        deleting = false
+                        confirm = null
+                        if (code == 204) {
+                            removed = removed + e.str("path")
+                            Toast.makeText(ctx, "Deleted ${e.str("name")} (${fmtBytes(e.optDouble("size"))})", Toast.LENGTH_SHORT).show()
+                        } else Toast.makeText(ctx, j?.str("error")?.ifBlank { null } ?: "Couldn't delete (no permission?)", Toast.LENGTH_LONG).show()
+                    }
+                }, enabled = !deleting) { Text(if (deleting) "Deleting…" else "Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton({ confirm = null }, enabled = !deleting) { Text("Cancel") } },
+        )
     }
 }

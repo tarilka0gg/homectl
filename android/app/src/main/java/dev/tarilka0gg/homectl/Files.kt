@@ -135,6 +135,8 @@ fun FilesScreen() {
         }
     }
 
+    LaunchedEffect(Hc.openPath, m.id) { Hc.openPath?.let { go(it); Hc.openPath = null } }
+
     val all = listing.value?.optJSONArray("entries")?.objs().orEmpty().filter { showHidden || !it.optBoolean("hidden") }
     val files = all.filter { !it.optBoolean("dir") }.map { RemoteFile(it.str("name"), full(it.str("name")), it.optLong("size"), it.optLong("mtime")) }
 

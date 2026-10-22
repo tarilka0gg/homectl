@@ -36,6 +36,7 @@ fun App() {
     var tab by remember { mutableStateOf(Tab.entries.getOrElse(Hc.lastTab) { Tab.Monitor }) }
     var menu by remember { mutableStateOf(false) }
     val m = Hc.cur!!
+    LaunchedEffect(Hc.openPath) { if (Hc.openPath != null) { tab = Tab.Files; Hc.setTab(Tab.Files.ordinal) } }
 
     Scaffold(
         topBar = {

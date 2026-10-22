@@ -295,52 +295,127 @@ pub async fn search(Query(q): Query<SearchQ>) -> Response {
     }
 }
 
-/// What takes the space below a folder: the biggest direct children, staying on one filesystem.
-pub async fn usage(Query(q): Query<PathQ>) -> Response {
-    let root = resolve(q.path.as_deref());
-    let r = tokio::task::spawn_blocking(move || {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
-        let dev = std::fs::metadata(&root).ok()?.dev();
-        let mut timed_out = false;
-        let mut rows = vec![];
-        let mut loose = 0u64;
-        for e in std::fs::read_dir(&root).ok()?.flatten() {
-            let Ok(m) = e.metadata() else { continue };
-            if !m.is_dir() {
-                loose += m.len();
-                continue;
-            }
-            if m.dev() != dev {
-                continue;
-            }
-            let (mut total, mut stack) = (0u64, vec![e.path()]);
-            while let Some(d) = stack.pop() {
-                if std::time::Instant::now() > deadline {
-                    timed_out = true;
-                    break;
-                }
-                let Ok(rd) = std::fs::read_dir(&d) else { continue };
-                for c in rd.flatten() {
-                    let Ok(cm) = c.metadata() else { continue };
-                    if cm.is_dir() {
-                        if cm.dev() == dev {
-                            stack.push(c.path());
+struct Kid {
+    name: String,
+    path: PathBuf,
+    dir: bool,
+    size: std::sync::atomic::AtomicU64,
+}
+
+/// Disk usage of each direct child of [`root`], walking all folders on many threads (like `dust`),
+/// staying on one filesystem. Gives up after `limit` and reports what it has so far.
+fn scan(root: &std::path::Path, limit: std::time::Duration) -> Option<serde_json::Value> {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed},
+        Condvar, Mutex,
+    };
+    let started = std::time::Instant::now();
+    let dev = std::fs::symlink_metadata(root).ok()?.dev();
+    let mut kids = vec![];
+    for e in std::fs::read_dir(root).ok()?.flatten() {
+        let Ok(m) = e.metadata() else { continue };
+        if m.is_dir() && m.dev() != dev {
+            continue; // another filesystem mounted below
+        }
+        kids.push(Kid { name: e.file_name().to_string_lossy().into_owned(), path: e.path(), dir: m.is_dir(), size: (m.blocks() * 512).into() });
+    }
+    let queue: Mutex<Vec<(usize, PathBuf)>> = Mutex::new(kids.iter().enumerate().filter(|(_, k)| k.dir).map(|(i, k)| (i, k.path.clone())).collect());
+    let pending = AtomicUsize::new(queue.lock().unwrap().len()); // folders queued or being read
+    let cv = Condvar::new();
+    let timed_out = AtomicBool::new(false);
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 16);
+    std::thread::scope(|sc| {
+        for _ in 0..workers {
+            sc.spawn(|| loop {
+                let item = {
+                    let mut q = queue.lock().unwrap();
+                    loop {
+                        if timed_out.load(Relaxed) {
+                            break None;
                         }
-                    } else {
-                        total += cm.blocks() * 512;
+                        if let Some(i) = q.pop() {
+                            break Some(i);
+                        }
+                        if pending.load(Relaxed) == 0 {
+                            break None;
+                        }
+                        q = cv.wait_timeout(q, std::time::Duration::from_millis(20)).unwrap().0;
+                    }
+                };
+                let Some((k, dir)) = item else {
+                    cv.notify_all();
+                    return;
+                };
+                if started.elapsed() > limit {
+                    timed_out.store(true, Relaxed);
+                }
+                if let Ok(rd) = std::fs::read_dir(&dir) {
+                    for e in rd.flatten() {
+                        let Ok(m) = e.metadata() else { continue };
+                        kids[k].size.fetch_add(m.blocks() * 512, Relaxed);
+                        if m.is_dir() && m.dev() == dev {
+                            pending.fetch_add(1, Relaxed);
+                            queue.lock().unwrap().push((k, e.path()));
+                            cv.notify_one();
+                        }
                     }
                 }
-            }
-            rows.push((total, e.file_name().to_string_lossy().into_owned(), e.path().display().to_string()));
+                if pending.fetch_sub(1, Relaxed) == 1 {
+                    cv.notify_all();
+                }
+            });
         }
-        rows.sort_by(|a, b| b.0.cmp(&a.0));
-        let entries: Vec<_> = rows.into_iter().take(40).map(|(size, name, path)| json!({"name": name, "path": path, "size": size})).collect();
-        Some(json!({"path": root.display().to_string(), "entries": entries, "files_here": loose, "partial": timed_out}))
-    })
-    .await;
-    match r {
+    });
+    let mut rows: Vec<(u64, &Kid)> = kids.iter().map(|k| (k.size.load(Relaxed), k)).collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    let total: u64 = rows.iter().map(|r| r.0).sum();
+    let entries: Vec<_> = rows.into_iter().take(80).map(|(size, k)| json!({"name": k.name, "path": k.path.display().to_string(), "dir": k.dir, "size": size})).collect();
+    Some(json!({"path": root.display().to_string(), "entries": entries, "total": total, "partial": timed_out.load(Relaxed), "ms": started.elapsed().as_millis() as u64}))
+}
+
+/// What takes the space below a folder: its biggest folders and files.
+pub async fn usage(Query(q): Query<PathQ>) -> Response {
+    let root = resolve(q.path.as_deref());
+    match tokio::task::spawn_blocking(move || scan(&root, std::time::Duration::from_secs(60))).await {
         Ok(Some(v)) => Json(v).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct DelReq {
+    path: String,
+}
+
+/// Deletes a file or a whole folder. Refuses the filesystem root, top-level system folders, the home folder
+/// itself and mount points, so a mistaken tap can't empty the machine.
+pub async fn delete(Json(r): Json<DelReq>) -> Response {
+    if std::env::var("HOMECTL_NO_DELETE").is_ok() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let p = resolve(Some(&r.path));
+    let Ok(p) = tokio::fs::canonicalize(&p).await else { return StatusCode::NOT_FOUND.into_response() };
+    if p.components().count() < 3 || p == home() || home().starts_with(&p) {
+        return err("Refusing to delete a system or home folder.".into());
+    }
+    let res = tokio::task::spawn_blocking(move || -> Result<u64, String> {
+        let m = std::fs::symlink_metadata(&p).map_err(|e| e.to_string())?;
+        if m.is_dir() {
+            let parent = p.parent().and_then(|x| std::fs::metadata(x).ok());
+            if parent.is_some_and(|pm| pm.dev() != m.dev()) {
+                return Err("That folder is a mount point.".into());
+            }
+            std::fs::remove_dir_all(&p).map_err(|e| e.to_string())?;
+        } else {
+            std::fs::remove_file(&p).map_err(|e| e.to_string())?;
+        }
+        Ok(m.blocks() * 512)
+    })
+    .await;
+    match res {
+        Ok(Ok(_)) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) => err(e),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

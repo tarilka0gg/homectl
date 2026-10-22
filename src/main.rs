@@ -525,6 +525,7 @@ async fn main() {
         .route("/fs/thumb", get(fs::thumb))
         .route("/fs/search", get(fs::search))
         .route("/fs/usage", get(fs::usage))
+        .route("/fs/delete", post(fs::delete))
         .route("/fs/archive/list", get(fs::archive_list))
         .route("/fs/archive/extract", post(fs::archive_extract))
         .route("/fs/archive/file", get(fs::archive_file))

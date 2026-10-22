@@ -252,6 +252,9 @@ object Hc {
     var compositorOff by mutableStateOf(true)
     fun updateCompositorOff(v: Boolean) { compositorOff = v; prefs.edit().putBoolean("compoff", v).apply() }
 
+    /** A folder another screen asked the Files tab to show (consumed by Files). */
+    var openPath by mutableStateOf<String?>(null)
+
     /** Last open tab, so coming back to the app lands where you left. */
     var lastTab by mutableIntStateOf(0)
 
