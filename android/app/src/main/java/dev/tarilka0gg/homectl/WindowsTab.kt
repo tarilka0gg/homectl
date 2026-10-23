@@ -187,7 +187,9 @@ fun WindowsScreen() {
 
 @Composable
 private fun WindowCard(c: WinCard, modifier: Modifier, onOpen: () -> Unit, onFocus: () -> Unit, onClose: () -> Unit) {
-    val ring by animateColorAsState(if (c.focused) MaterialTheme.colorScheme.primary else Color.Transparent, tween(400), label = "focus")
+    // The desktop's focus is deliberately not shown: it moves for reasons that have nothing to do with this list (notifications,
+    // the mouse), and a ring that jumps between cards made the list look like it was misbehaving.
+    val ring = Color.Transparent
     var flash by remember { mutableFloatStateOf(0f) }
     var first by remember { mutableStateOf(true) }
     LaunchedEffect(c.preview) {
