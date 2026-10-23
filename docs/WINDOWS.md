@@ -8,19 +8,28 @@ it natively, so it is sharp at any size, fast on a slow link, selectable, and us
 
 | Source | What the phone gets |
 |---|---|
-| **niri** (the compositor's IPC socket) | every window: title, app id, icon, workspace, focus, floating. Bring to front and close work too. |
+| **The compositor**, through the standard wlroots protocol `zwlr_foreign_toplevel_manager_v1` (`src/toplevels.rs`) | every window: title, app id, icon. Bring to front and close work too. Nothing is specific to one compositor (niri, sway, Hyprland, river, …). Workspaces, focus and geometry are deliberately not used. |
 | **`homectl-pty`** | a terminal's real content: text, colours, attributes, cursor, title, working directory, scrollback. The phone can type into it. |
 
 A terminal that was not started through `homectl-pty` still appears, with its title and icon, but a Wayland compositor does
-not let any program read another window's text, so its content cannot be shown. Without niri, only `homectl-pty` terminals are
-listed. Other compositors would need a small adapter (`src/windows.rs`, the `niri_*` functions).
+not let any program read another window's text, so its content cannot be shown. Without a compositor that offers the protocol,
+only `homectl-pty` terminals are listed.
 
 ## Mirroring a terminal
 
 `homectl-pty [COMMAND…]` runs your shell (or the command) inside the terminal window you already have, and is transparent: it
 puts the real terminal in raw mode, runs the command on a pty and copies bytes both ways. It also keeps a small model of the
 screen. Use it as the terminal's command, for example in ghostty `command = homectl-pty`, in foot `shell=homectl-pty`, or
-type `homectl-pty` once in a window. A window started this way is matched with its compositor window through the process tree.
+type `homectl-pty` once in a window. A window started this way is matched with its compositor window by a name of its own (below).
+
+### Every window has its own name
+
+One terminal program (ghostty) runs all of its windows in a single process, so a process id cannot say which window a wrapper
+lives in. Instead each wrapper draws a random 24-bit name and writes it, invisibly, into every window title its shell sets
+(OSC 0 and OSC 2): U+2060, then 24 zero-width characters (U+200B = 0, U+200C = 1), then U+2060. The compositor hands the title
+back, the daemon reads the name out of it (`wid_of` in `src/windows.rs`) and joins the window to the wrapper whose snapshot
+carries the same `wid`. Any number of windows of the same terminal are told apart exactly, titles show no trace of it, and the
+same scheme works for any other terminal that passes titles through. A wrapper whose name no title carries is listed on its own.
 
 The wrapper is a single static Zig program with no dependencies (`zig/pty.zig`). It serves the screen on a unix socket,
 `$XDG_RUNTIME_DIR/homectl/win/<pid>.sock`, in a directory only you can enter; the daemon is the only thing that talks to it.
@@ -30,10 +39,10 @@ The wrapper is a single static Zig program with no dependencies (`zig/pty.zig`).
 `GET /api/windows`
 
 ```json
-{"niri": true, "windows": [
-  {"id": "n12", "title": "…", "app_id": "com.mitchellh.ghostty", "workspace": "1", "focused": true, "floating": false,
+{"compositor": true, "windows": [
+  {"id": "w1", "title": "…", "app_id": "com.mitchellh.ghostty", "workspace": null, "focused": false, "floating": false,
    "kind": "terminal", "term": "p4242", "preview": ["last", "few", "lines"], "cwd": "/home/me", "cmd": "/bin/fish", "cols": 120, "rows": 32},
-  {"id": "n15", "title": "…", "app_id": "zen", "workspace": "1", "focused": false, "floating": false, "kind": "window"}
+  {"id": "w2", "title": "…", "app_id": "zen", "workspace": null, "focused": false, "floating": false, "kind": "window"}
 ]}
 ```
 

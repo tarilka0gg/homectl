@@ -3,6 +3,8 @@
 All notable changes to homectl, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/), with
 `## Unreleased
 
+- **The Windows list no longer depends on niri.** Windows come from the standard wlroots foreign-toplevel protocol, so any compositor that offers it works; workspaces and focus are not used, and the app no longer shows the desktop's focus.
+- **Every terminal window has an invisible name of its own** (24 bits of zero-width characters appended to its title by `homectl-pty`), so several windows of one ghostty process are told apart exactly. Wrappers started before this version show up as separate cards.
 - **Terminals mirror themselves.** New fish shells start inside `homectl-pty` through `packaging/shell/homectl.fish` (copy it to `~/.config/fish/conf.d/`). `homectl-attach` does the same for a shell that is already open. The new `homectl-adopt` helper (runs beside the daemon, started by `homectl-launch`) does it for you: it finds idle fish shells that are not wrapped yet, borrows the terminal's pty with `pidfd_getfd` and types `homectl-attach`. Needs yama `ptrace_scope` 0; off with `HOMECTL_NO_ADOPT=1` or `HOMECTL_NO_TERMINAL=1`.
 - The app says so when saved logins were lost on a reinstall (Android removes the keys), and no longer half-restores a backup.
 

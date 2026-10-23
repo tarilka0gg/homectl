@@ -67,6 +67,7 @@ const Term = struct {
     saved: struct { cx: usize = 0, cy: usize = 0, pen: Cell = .{} } = .{},
     top: usize = 0,
     bot: usize,
+    wid: [6]u8 = "000000".*,
     title: [200]u8 = undefined,
     title_len: usize = 0,
     cwd: [400]u8 = undefined,
@@ -637,6 +638,8 @@ fn snapshot(t: *Term, back_want: usize, pid: i32, cmd: []const u8) Buf {
     b.s(if (t.cursor_visible) "true" else "false");
     b.s(",\"alt\":");
     b.s(if (t.use_alt) "true" else "false");
+    b.s(",\"wid\":");
+    b.str(&t.wid);
     b.s(",\"title\":");
     b.str(t.title[0..t.title_len]);
     b.s(",\"cwd\":");
@@ -755,6 +758,127 @@ fn restore() void {
     if (raw_on) _ = linux.ioctl(0, linux.T.CSETS, @intFromPtr(&term_orig));
 }
 
+
+/// Gives every window a name of its own that no one can see. Ghostty runs all its windows in one process, so a process id
+/// cannot tell two windows apart; the title can, if the wrapper writes an invisible name into it. The name is 24 bits drawn as
+/// zero-width characters (U+200B = 0, U+200C = 1) between two word joiners (U+2060) and is appended to every window title the
+/// shell sets (OSC 0 and OSC 2), so whoever lists the windows can read it back from the title.
+const Tagger = struct {
+    id: u24,
+    st: enum { ground, esc, head, title, title_esc, pass, pass_esc } = .ground,
+    pend: [1100]u8 = undefined,
+    n: usize = 0,
+    hex: [6]u8 = undefined,
+    title_at: usize = 0,
+
+    fn init(id: u24) Tagger {
+        var t = Tagger{ .id = id };
+        _ = std.fmt.bufPrint(&t.hex, "{x:0>6}", .{id}) catch unreachable;
+        return t;
+    }
+
+    /// The invisible name as UTF-8.
+    fn marker(t: *const Tagger, out: *[80]u8) []const u8 {
+        var i: usize = 0;
+        const wj = "\xe2\x81\xa0";
+        @memcpy(out[i..][0..3], wj);
+        i += 3;
+        var bit: u5 = 23;
+        while (true) {
+            @memcpy(out[i..][0..3], if ((t.id >> bit) & 1 == 1) "\xe2\x80\x8c" else "\xe2\x80\x8b");
+            i += 3;
+            if (bit == 0) break;
+            bit -= 1;
+        }
+        @memcpy(out[i..][0..3], wj);
+        i += 3;
+        return out[0..i];
+    }
+
+    fn flushPend(t: *Tagger, out: *std.ArrayList(u8)) void {
+        out.appendSlice(A, t.pend[0..t.n]) catch {};
+        t.n = 0;
+    }
+
+    fn emit(t: *Tagger, out: *std.ArrayList(u8), st_terminated: bool) void {
+        var mb: [80]u8 = undefined;
+        const text = t.pend[t.title_at..t.n];
+        out.appendSlice(A, "\x1b]2;") catch {};
+        out.appendSlice(A, text) catch {};
+        out.appendSlice(A, t.marker(&mb)) catch {};
+        out.appendSlice(A, if (st_terminated) "\x1b\\" else "\x07") catch {};
+        t.n = 0;
+        t.st = .ground;
+    }
+
+
+    /// Copies `in` to `out`, adding the name to window titles.
+    fn feed(t: *Tagger, in: []const u8, out: *std.ArrayList(u8)) void {
+        for (in) |b| t.byte(b, out);
+    }
+
+    fn byte(t: *Tagger, b: u8, out: *std.ArrayList(u8)) void {
+        switch (t.st) {
+            .ground => if (b == 0x1b) {
+                t.pend[0] = b;
+                t.n = 1;
+                t.st = .esc;
+            } else out.append(A, b) catch {},
+            .esc => if (b == ']') {
+                t.pend[t.n] = b;
+                t.n += 1;
+                t.st = .head;
+            } else {
+                t.flushPend(out);
+                t.st = .ground;
+                t.byte(b, out);
+            },
+            .head => {
+                if (b >= '0' and b <= '9' and t.n < 5) {
+                    t.pend[t.n] = b;
+                    t.n += 1;
+                } else if (b == ';' and (std.mem.eql(u8, t.pend[2..t.n], "0") or std.mem.eql(u8, t.pend[2..t.n], "2"))) {
+                    t.pend[t.n] = b;
+                    t.n += 1;
+                    t.title_at = t.n;
+                    t.st = .title;
+                } else {
+                    t.flushPend(out);
+                    t.st = .pass;
+                    t.byte(b, out);
+                }
+            },
+            .title => switch (b) {
+                0x07 => t.emit(out, false),
+                0x1b => t.st = .title_esc,
+                else => if (t.n < t.pend.len) {
+                    t.pend[t.n] = b;
+                    t.n += 1;
+                } else {
+                    t.flushPend(out);
+                    t.st = .pass;
+                    t.byte(b, out);
+                },
+            },
+            .title_esc => if (b == '\\') t.emit(out, true) else {
+                // another escape sequence began inside the title: the title is abandoned
+                t.flushPend(out);
+                out.append(A, 0x1b) catch {};
+                t.st = .ground;
+                t.byte(b, out);
+            },
+            .pass => {
+                out.append(A, b) catch {};
+                if (b == 0x07) t.st = .ground else if (b == 0x1b) t.st = .pass_esc;
+            },
+            .pass_esc => {
+                out.append(A, b) catch {};
+                t.st = if (b == '\\') .ground else if (b == 0x1b) .pass_esc else .pass;
+            },
+        }
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
     _ = args.skip();
@@ -840,6 +964,20 @@ pub fn main(init: std.process.Init) !void {
 
     // the screen model and the socket
     var term = Term.init(master, ws.col, ws.row);
+    // an invisible name for this window, written into every title the shell sets (see Tagger)
+    var tag = blk: {
+        var r: [3]u8 = undefined;
+        _ = linux.getrandom(&r, r.len, 0);
+        break :blk Tagger.init(@as(u24, r[0]) << 16 | @as(u24, r[1]) << 8 | r[2]);
+    };
+    term.wid = tag.hex;
+    var tagged: std.ArrayList(u8) = .empty;
+    if (interactive) {
+        var mb: [80]u8 = undefined;
+        _ = writeAllFd(1, "\x1b]2;");
+        _ = writeAllFd(1, tag.marker(&mb));
+        _ = writeAllFd(1, "\x07");
+    }
     var cmdline: std.ArrayList(u8) = .empty;
     for (argv_list.items, 0..) |a, i| {
         if (i > 0) try cmdline.append(A, ' ');
@@ -924,7 +1062,9 @@ pub fn main(init: std.process.Init) !void {
             if (linux.errno(n) != .SUCCESS or n == 0) {
                 if (linux.errno(n) != .INTR and linux.errno(n) != .AGAIN) break :main;
             } else {
-                _ = writeAllFd(1, buf[0..n]);
+                tagged.clearRetainingCapacity();
+                tag.feed(buf[0..n], &tagged);
+                _ = writeAllFd(1, tagged.items);
                 term.feed(buf[0..n]);
             }
         }
@@ -1098,5 +1238,51 @@ test "random bytes never trip a safety check" {
         }
         t.feed(&buf);
         if (i % 50 == 0) t.resize(3 + rnd.uintLessThan(usize, 30), 2 + rnd.uintLessThan(usize, 12));
+    }
+}
+
+test "title tagger names the window and survives split input" {
+    var tg = Tagger.init(0xA5C3F0);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(A);
+    // plain text and other escapes pass through untouched
+    tg.feed("hi \x1b[31mred\x1b[0m\x1b]7;file:///x\x07!", &out);
+    try std.testing.expectEqualStrings("hi \x1b[31mred\x1b[0m\x1b]7;file:///x\x07!", out.items);
+    out.clearRetainingCapacity();
+    // a title set in two pieces, ended by BEL
+    tg.feed("\x1b]0;my", &out);
+    tg.feed(" title\x07after", &out);
+    var mb: [80]u8 = undefined;
+    const want = try std.fmt.allocPrint(A, "\x1b]2;my title{s}\x07after", .{tg.marker(&mb)});
+    defer A.free(want);
+    try std.testing.expectEqualStrings(want, out.items);
+    out.clearRetainingCapacity();
+    // ST terminator is kept
+    tg.feed("\x1b]2;x\x1b\\", &out);
+    const want2 = try std.fmt.allocPrint(A, "\x1b]2;x{s}\x1b\\", .{tg.marker(&mb)});
+    defer A.free(want2);
+    try std.testing.expectEqualStrings(want2, out.items);
+    // the name holds the 24 bits: 0xA5C3F0 = 1010 0101 1100 0011 1111 0000
+    const m = tg.marker(&mb);
+    try std.testing.expectEqual(@as(usize, 78), m.len);
+    var id: u24 = 0;
+    var i: usize = 3;
+    while (i < 3 + 72) : (i += 3) id = id << 1 | @as(u24, if (m[i + 2] == 0x8c) 1 else 0);
+    try std.testing.expectEqual(@as(u24, 0xA5C3F0), id);
+}
+
+test "title tagger never eats bytes it does not understand" {
+    var tg = Tagger.init(1);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(A);
+    var prng = std.Random.DefaultPrng.init(7);
+    var input: [4096]u8 = undefined;
+    for (0..50) |_| {
+        prng.random().bytes(&input);
+        // sprinkle escapes so the state machine is exercised
+        for (0..40) |k| input[prng.random().uintLessThan(usize, input.len)] = if (k % 3 == 0) 0x1b else if (k % 3 == 1) ']' else ';';
+        out.clearRetainingCapacity();
+        tg.feed(&input, &out);
+        try std.testing.expect(out.items.len + 1100 >= input.len);
     }
 }

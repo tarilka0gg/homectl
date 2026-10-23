@@ -1,8 +1,13 @@
 //! The phone's window list: what is open on this machine's desktop, as data rather than pixels.
 //!
-//! Window titles, app ids, workspaces and focus come from the niri compositor's IPC socket. Terminals started through
-//! `homectl-pty` (see zig/pty.zig) also serve their screen on a unix socket, so the phone gets real text, colours and
-//! scrollback and can type into them. A terminal that was not started that way still shows up, with a title and an icon.
+//! Window titles and app ids come from the compositor through the standard wlroots protocol (see toplevels.rs), so nothing
+//! here depends on a particular compositor. Terminals started through `homectl-pty` (see zig/pty.zig) also serve their screen
+//! on a unix socket, so the phone gets real text, colours and scrollback and can type into them; a terminal that was not
+//! started that way still shows up, with a title and an icon.
+//!
+//! Which window is which wrapper is settled by a name that only the two of them know: the wrapper writes an invisible name
+//! (24 bits as zero-width characters) into every title its shell sets, and the compositor hands that title back. Process ids
+//! cannot do this job, because one ghostty process owns all of its windows.
 //! The format is described in docs/WINDOWS.md.
 
 use axum::{
@@ -35,40 +40,6 @@ fn win_dir() -> PathBuf {
     } else {
         PathBuf::from(format!("/tmp/homectl-{}/win", uid()))
     }
-}
-
-// ---- niri ----
-
-fn niri_socket() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("NIRI_SOCKET") {
-        return Some(p.into());
-    }
-    let mut socks: Vec<_> = std::fs::read_dir(runtime_dir()).ok()?.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("niri.") && e.file_name().to_string_lossy().ends_with(".sock")).collect();
-    socks.sort_by_key(|e| std::cmp::Reverse(e.metadata().and_then(|m| m.modified()).ok()));
-    socks.first().map(|e| e.path())
-}
-
-async fn niri_call(req: Value) -> Option<Value> {
-    let path = niri_socket()?;
-    let work = async {
-        let mut s = UnixStream::connect(path).await.ok()?;
-        s.write_all(format!("{req}\n").as_bytes()).await.ok()?;
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 8192];
-        loop {
-            let n = s.read(&mut chunk).await.ok()?;
-            if n == 0 {
-                break;
-            }
-            buf.extend_from_slice(&chunk[..n]);
-            if buf.contains(&b'\n') {
-                break;
-            }
-        }
-        serde_json::from_slice::<Value>(buf.split(|b| *b == b'\n').next()?).ok()
-    };
-    let v = timeout(Duration::from_secs(2), work).await.ok()??;
-    v.get("Ok").cloned()
 }
 
 // ---- terminals started through homectl-pty ----
@@ -130,23 +101,23 @@ async fn snapshot(pid: u32, back: u16) -> Option<Value> {
     timeout(Duration::from_millis(600), work).await.ok()?
 }
 
-fn ppid(pid: u32) -> Option<u32> {
-    let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    s.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()
+/// The invisible name a wrapper put into a window title (see `Tagger` in zig/pty.zig): U+2060, 24 zero-width bits, U+2060.
+fn wid_of(title: &str) -> Option<String> {
+    let mut it = title.chars().skip_while(|c| *c != '\u{2060}').skip(1);
+    let mut id: u32 = 0;
+    for _ in 0..24 {
+        id = id << 1 | match it.next()? {
+            '\u{200b}' => 0,
+            '\u{200c}' => 1,
+            _ => return None,
+        };
+    }
+    (it.next()? == '\u{2060}').then(|| format!("{id:06x}"))
 }
 
-/// The ancestors of `pid`, nearest first.
-fn ancestors(pid: u32) -> Vec<u32> {
-    let mut v = vec![];
-    let mut p = pid;
-    while let Some(pp) = ppid(p) {
-        if pp <= 1 || v.len() > 32 {
-            break;
-        }
-        v.push(pp);
-        p = pp;
-    }
-    v
+/// The title as people should see it, without the invisible name.
+fn clean_title(title: &str) -> String {
+    title.chars().filter(|c| !matches!(*c, '\u{2060}' | '\u{200b}' | '\u{200c}')).collect()
 }
 
 fn plain(line: &Value) -> String {
@@ -172,60 +143,63 @@ fn preview_runs(snap: &Value) -> Vec<Value> {
 // ---- the list ----
 
 pub async fn list() -> impl IntoResponse {
-    let (wins, spaces) = tokio::join!(niri_call(json!("Windows")), niri_call(json!("Workspaces")));
-    let niri = wins.is_some();
-    let space_name: HashMap<u64, String> = spaces
-        .as_ref()
-        .and_then(|v| v.get("Workspaces")?.as_array().cloned())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|w| Some((w["id"].as_u64()?, w["name"].as_str().map(str::to_string).unwrap_or_else(|| w["idx"].to_string()))))
-        .collect();
+    let tops = crate::toplevels::list();
+    let connected = tops.is_some();
 
     let wrapped = wrapped_pids();
     let snaps: Vec<(u32, Option<Value>)> = futures_util::future::join_all(wrapped.iter().map(|p| async move { (*p, snapshot(*p, 0).await) })).await;
-    let mut free: HashMap<u32, Option<Value>> = snaps.into_iter().collect();
-    // the wrapper's ancestors say which window it lives in
-    let anc: HashMap<u32, Vec<u32>> = free.keys().map(|p| (*p, ancestors(*p))).collect();
+    // wrapper name -> (pid, snapshot); a wrapper that is not matched to a window is listed on its own below
+    let mut by_wid: HashMap<String, (u32, Value)> = HashMap::new();
+    let mut nameless: Vec<(u32, Value)> = vec![];
+    for (p, s) in snaps {
+        let Some(s) = s else { continue };
+        match s["wid"].as_str().filter(|w| !w.is_empty() && *w != "000000") {
+            Some(w) => {
+                by_wid.insert(w.to_string(), (p, s));
+            }
+            None => nameless.push((p, s)),
+        }
+    }
 
     let mut cards = vec![];
-    for w in wins.as_ref().and_then(|v| v.get("Windows")?.as_array().cloned()).unwrap_or_default() {
-        let wpid = w["pid"].as_u64().unwrap_or(0) as u32;
-        let hit = anc.iter().find(|(_, a)| wpid != 0 && a.contains(&wpid)).map(|(p, _)| *p);
-        let snap = hit.and_then(|p| free.remove(&p)).flatten();
+    for t in tops.unwrap_or_default() {
         let mut card = json!({
-            "id": format!("n{}", w["id"]),
-            "title": w["title"],
-            "app_id": w["app_id"],
-            "workspace": w["workspace_id"].as_u64().and_then(|i| space_name.get(&i).cloned()),
-            "focused": w["is_focused"],
-            "floating": w["is_floating"],
+            "id": format!("w{}", t.n),
+            "title": clean_title(&t.title),
+            "app_id": t.app_id,
+            "workspace": null,
+            "focused": false,
+            "floating": false,
             "kind": "window",
         });
-        if let (Some(p), Some(s)) = (hit, snap) {
-            card["kind"] = json!("terminal");
-            card["term"] = json!(format!("p{p}"));
-            card["preview"] = json!(preview(&s));
-            card["pv"] = json!(preview_runs(&s));
-            card["cwd"] = s["cwd"].clone();
-            card["cmd"] = s["cmd"].clone();
-            card["cols"] = s["cols"].clone();
-            card["rows"] = s["rows"].clone();
+        if let Some((p, s)) = wid_of(&t.title).and_then(|w| by_wid.remove(&w)) {
+            fill_terminal(&mut card, p, &s);
         }
         cards.push(card);
     }
-    // wrapped terminals the compositor does not know (no niri, or another compositor)
-    let mut rest: Vec<(u32, Option<Value>)> = free.into_iter().collect();
+    // wrapped terminals no window title points to (no compositor, a terminal that hides its title, or an older wrapper)
+    let mut rest: Vec<(u32, Value)> = by_wid.into_values().chain(nameless).collect();
     rest.sort_by_key(|(p, _)| *p); // a stable order, or the cards would shuffle between refreshes
     for (p, s) in rest {
-        let Some(s) = s else { continue };
-        cards.push(json!({
+        let mut card = json!({
             "id": format!("p{p}"), "title": if s["title"].as_str().unwrap_or("").is_empty() { s["cmd"].clone() } else { s["title"].clone() },
-            "app_id": "terminal", "workspace": null, "focused": false, "floating": false, "kind": "terminal",
-            "term": format!("p{p}"), "preview": preview(&s), "pv": preview_runs(&s), "cwd": s["cwd"], "cmd": s["cmd"], "cols": s["cols"], "rows": s["rows"],
-        }));
+            "app_id": "terminal", "workspace": null, "focused": false, "floating": false, "kind": "window",
+        });
+        fill_terminal(&mut card, p, &s);
+        cards.push(card);
     }
-    Json(json!({"niri": niri, "windows": cards}))
+    Json(json!({"compositor": connected, "windows": cards}))
+}
+
+fn fill_terminal(card: &mut Value, pid: u32, s: &Value) {
+    card["kind"] = json!("terminal");
+    card["term"] = json!(format!("p{pid}"));
+    card["preview"] = json!(preview(s));
+    card["pv"] = json!(preview_runs(s));
+    card["cwd"] = s["cwd"].clone();
+    card["cmd"] = s["cmd"].clone();
+    card["cols"] = s["cols"].clone();
+    card["rows"] = s["rows"].clone();
 }
 
 fn term_pid(id: &str) -> Option<u32> {
@@ -289,35 +263,29 @@ pub async fn input(Path(id): Path<String>, Json(b): Json<InputB>) -> StatusCode 
     }
 }
 
-async fn niri_window_for(id: &str) -> Option<u64> {
-    if let Some(n) = id.strip_prefix('n') {
+/// The compositor's window number for a card id: `w<n>` is one directly, `p<pid>` is found through the name its wrapper wrote
+/// into the window title.
+async fn window_for(id: &str) -> Option<u64> {
+    if let Some(n) = id.strip_prefix('w') {
         return n.parse().ok();
     }
-    let pid = term_pid(id)?;
-    let anc = ancestors(pid);
-    let wins = niri_call(json!("Windows")).await?;
-    wins.get("Windows")?.as_array()?.iter().find(|w| w["pid"].as_u64().is_some_and(|p| anc.contains(&(p as u32))))?["id"].as_u64()
+    let wid = snapshot(term_pid(id)?, 0).await?["wid"].as_str()?.to_string();
+    crate::toplevels::list()?.into_iter().find(|t| wid_of(&t.title).as_deref() == Some(wid.as_str())).map(|t| t.n)
 }
 
 pub async fn focus(Path(id): Path<String>) -> StatusCode {
-    let Some(n) = niri_window_for(&id).await else { return StatusCode::NOT_FOUND };
+    let Some(n) = window_for(&id).await else { return StatusCode::NOT_FOUND };
     // the only place homectl ever changes focus; logged so an unexpected switch can be traced to the phone or ruled out
-    eprintln!("windows: bring-to-front requested for {id} (niri window {n})");
-    match niri_call(json!({"Action": {"FocusWindow": {"id": n}}})).await {
-        Some(_) => StatusCode::NO_CONTENT,
-        None => StatusCode::BAD_GATEWAY,
-    }
+    eprintln!("windows: bring-to-front requested for {id} (window {n})");
+    if crate::toplevels::focus(n) { StatusCode::NO_CONTENT } else { StatusCode::BAD_GATEWAY }
 }
 
 pub async fn close(Path(id): Path<String>) -> StatusCode {
     if std::env::var("HOMECTL_NO_DELETE").is_ok() {
         return StatusCode::FORBIDDEN;
     }
-    let Some(n) = niri_window_for(&id).await else { return StatusCode::NOT_FOUND };
-    match niri_call(json!({"Action": {"CloseWindow": {"id": n}}})).await {
-        Some(_) => StatusCode::NO_CONTENT,
-        None => StatusCode::BAD_GATEWAY,
-    }
+    let Some(n) = window_for(&id).await else { return StatusCode::NOT_FOUND };
+    if crate::toplevels::close(n) { StatusCode::NO_CONTENT } else { StatusCode::BAD_GATEWAY }
 }
 
 // ---- icons ----
@@ -409,8 +377,20 @@ mod tests {
     #[test]
     fn ids_round_trip() {
         assert_eq!(term_pid("p4242"), Some(4242));
-        assert_eq!(term_pid("n7"), None);
+        assert_eq!(term_pid("w7"), None);
         assert_eq!(term_pid("p../../x"), None);
+    }
+
+    #[test]
+    fn the_invisible_window_name_is_read_back_from_a_title() {
+        // 0xA5C3F0 as the wrapper writes it
+        let bits = "101001011100001111110000";
+        let mark: String = std::iter::once('\u{2060}').chain(bits.chars().map(|b| if b == '1' { '\u{200c}' } else { '\u{200b}' })).chain(std::iter::once('\u{2060}')).collect();
+        let title = format!("README.md{mark}");
+        assert_eq!(wid_of(&title).as_deref(), Some("a5c3f0"));
+        assert_eq!(clean_title(&title), "README.md");
+        assert_eq!(wid_of("plain title"), None);
+        assert_eq!(wid_of("cut\u{2060}\u{200b}\u{200c}"), None);
     }
 
     #[test]
