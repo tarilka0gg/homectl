@@ -301,6 +301,8 @@ async fn niri_window_for(id: &str) -> Option<u64> {
 
 pub async fn focus(Path(id): Path<String>) -> StatusCode {
     let Some(n) = niri_window_for(&id).await else { return StatusCode::NOT_FOUND };
+    // the only place homectl ever changes focus; logged so an unexpected switch can be traced to the phone or ruled out
+    eprintln!("windows: bring-to-front requested for {id} (niri window {n})");
     match niri_call(json!({"Action": {"FocusWindow": {"id": n}}})).await {
         Some(_) => StatusCode::NO_CONTENT,
         None => StatusCode::BAD_GATEWAY,
