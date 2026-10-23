@@ -37,7 +37,8 @@ private enum class Tab(val label: String, val icon: ImageVector) {
 fun App() {
     var adding by remember { mutableStateOf(!Hc.paired) }
     if (adding || !Hc.paired) return AddMachineScreen(canCancel = Hc.paired) { adding = false }
-    var tab by remember { mutableStateOf(Tab.entries.getOrElse(Hc.lastTab) { Tab.Monitor }) }
+    // the tab is remembered by name, so adding a tab never moves people to a different one
+    var tab by remember { mutableStateOf(Tab.entries.firstOrNull { it.name == Hc.memStr("tab.name") } ?: Tab.Monitor) }
     // each tab keeps its scroll position while you move between tabs, and across leaving the app
     val scrolls = remember { Tab.entries.associateWith { ScrollState(Hc.memInt("scroll.${it.name}")) } }
     val restored = remember { mutableStateMapOf<Tab, Boolean>() }
@@ -58,7 +59,7 @@ fun App() {
     val ctxApp = LocalContext.current
     LaunchedEffect(Unit) { PhoneClips.listen(ctxApp) }
     LaunchedEffect(Unit) { ClipService.ensure(ctxApp) }
-    LaunchedEffect(Hc.openPath) { if (Hc.openPath != null) { tab = Tab.Files; Hc.setTab(Tab.Files.ordinal) } }
+    LaunchedEffect(Hc.openPath) { if (Hc.openPath != null) { tab = Tab.Files; Hc.memPutStr("tab.name", Tab.Files.name) } }
 
     Scaffold(
         topBar = {
@@ -93,7 +94,7 @@ fun App() {
         bottomBar = {
             NavigationBar {
                 Tab.entries.forEach {
-                    NavigationBarItem(selected = tab == it, onClick = { tab = it; Hc.setTab(it.ordinal) }, icon = { Icon(it.icon, it.label) }, label = { Text(it.label, maxLines = 1) })
+                    NavigationBarItem(selected = tab == it, onClick = { tab = it; Hc.memPutStr("tab.name", it.name) }, icon = { Icon(it.icon, it.label) }, label = { Text(it.label, maxLines = 1) })
                 }
             }
         },

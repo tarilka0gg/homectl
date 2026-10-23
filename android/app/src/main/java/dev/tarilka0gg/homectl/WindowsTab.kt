@@ -108,7 +108,13 @@ private fun AppIcon(app: String, title: String, size: Int = 36) {
 fun WindowsScreen() {
     val m = Hc.cur ?: return
     val scope = rememberCoroutineScope()
-    val data by loaded(m.id, everyMs = 2000, cacheId = "windows") { Hc.json("/api/windows") }
+    // asked without Machine.call(): an older daemon answers 404, which must not mark the whole machine offline
+    var tooOld by remember(m.id) { mutableStateOf(false) }
+    val data by loaded(m.id, everyMs = 2000, cacheId = "windows") {
+        val (code, j) = m.getSlow("/api/windows", 8000)
+        tooOld = code == 404
+        j
+    }
     val cards = remember(data) { data?.optJSONArray("windows")?.objs()?.map { WinCard(it) }.orEmpty() }
     var openId by remember { mutableStateOf(Hc.memStr("windows.open").ifBlank { null }) }
     fun open(id: String?) { openId = id; Hc.memPutStr("windows.open", id.orEmpty()) }
@@ -127,6 +133,7 @@ fun WindowsScreen() {
                 Text("Windows", style = MaterialTheme.typography.titleLarge)
                 Text(
                     when {
+                        tooOld -> "needs homectl 0.18.0 or newer on this machine"
                         data == null -> "loading…"
                         cards.isEmpty() -> "nothing open"
                         else -> "${cards.size} open · ${cards.count { it.isTerminal }} mirrored"
@@ -135,7 +142,9 @@ fun WindowsScreen() {
                 )
             }
         }
-        if (data != null && cards.none { it.isTerminal }) {
+        if (tooOld) {
+            Text("Update the homectl daemon on ${m.name} (System shows its version), then this tab fills in.", Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium)
+        } else if (data != null && cards.none { it.isTerminal }) {
             Card(Modifier.fillMaxWidth().padding(16.dp, 8.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Mirror a terminal", style = MaterialTheme.typography.titleSmall)

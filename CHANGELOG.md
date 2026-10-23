@@ -5,6 +5,12 @@ All notable changes to homectl, newest first. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-10-23
+
+### Fixed
+- The app remembers the open tab by name instead of position, so adding the Windows tab no longer moved people to a different tab after updating (it opened Windows instead of Files).
+- On a machine whose daemon is older than 0.18.0, the Windows tab no longer marks the whole machine offline every few seconds; it says the daemon needs updating.
+
 ## [0.18.0] - 2026-10-23
 
 ### Added
