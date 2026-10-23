@@ -5,6 +5,9 @@ All notable changes to homectl, newest first. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+### Fixed
+- OpenRC service: the daemon never started when `/var/log/homectl.log` did not exist yet (the supervisor opens it after dropping to the service user, so the service now creates it first).
+
 ## [0.18.1] - 2026-10-23
 
 ### Fixed

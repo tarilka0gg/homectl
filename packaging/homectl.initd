@@ -23,6 +23,8 @@ depend() {
 }
 
 start_pre() {
+	# the supervisor opens the log after dropping to the service user, so the file has to exist and belong to them
+	checkpath -f -m 0640 -o "$HOMECTL_USER" /var/log/homectl.log
 	# an outbound-only tunnel, so the phone can reach this machine from anywhere (no port forwarding, works behind carrier NAT)
 	if [ "${HOMECTL_TUNNEL:-quick}" != "off" ]; then
 		export HOMECTL_TUNNEL=quick
