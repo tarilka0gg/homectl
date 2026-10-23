@@ -65,6 +65,9 @@ private class WinCard(val j: JSONObject) {
     val kind = j.str("kind")
     val term = j.str("term")
     val preview = j.optJSONArray("preview")?.let { a -> (0 until a.length()).map { a.getString(it) } }.orEmpty()
+    val pv: List<List<Run>> = j.optJSONArray("pv")?.let { ls ->
+        (0 until ls.length()).map { i -> ls.getJSONArray(i).let { rs -> (0 until rs.length()).map { k -> rs.getJSONArray(k).let { Run(it.getString(0), it.getInt(1), it.getInt(2), it.getInt(3)) } } } }
+    }.orEmpty()
     val cwd = j.str("cwd")
     val cmd = j.str("cmd")
     val isTerminal get() = term.isNotEmpty()
@@ -93,7 +96,11 @@ private fun AppIcon(app: String, title: String, size: Int = 36) {
         bmp = img
     }
     val b = bmp
-    if (b != null) {
+    if (app == "terminal") {
+        Box(Modifier.size(size.dp).clip(RoundedCornerShape(8.dp)).background(Color(0xFF1B2128)), contentAlignment = Alignment.Center) {
+            Text(">_", color = Color(0xFF8BE9A0), fontFamily = FontFamily.Monospace, fontSize = (size * 0.38f).sp)
+        }
+    } else if (b != null) {
         Image(b, null, Modifier.size(size.dp).clip(RoundedCornerShape(8.dp)))
     } else {
         // no icon on the machine: a letter on a colour made from the app's name
@@ -198,7 +205,7 @@ private fun WindowCard(c: WinCard, modifier: Modifier, onOpen: () -> Unit, onFoc
             Column(Modifier.weight(1f)) {
                 Text(c.title.ifBlank { c.app.ifBlank { "window" } }, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
-                    listOfNotNull(c.app.takeIf { it.isNotBlank() }, c.workspace.takeIf { it.isNotBlank() }?.let { "workspace $it" }, if (c.isTerminal) "mirrored" else null).joinToString(" · "),
+                    listOfNotNull(c.app.takeIf { it.isNotBlank() && it != "terminal" }, c.cwd.takeIf { it.isNotBlank() }?.let { shortPath(it) }, c.workspace.takeIf { it.isNotBlank() }?.let { "workspace $it" }, if (c.isTerminal) "mirrored" else null).joinToString(" · "),
                     style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
@@ -217,11 +224,14 @@ private fun WindowCard(c: WinCard, modifier: Modifier, onOpen: () -> Unit, onFoc
                 Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp).clip(RoundedCornerShape(8.dp))
                     .background(Color(0xFF111418)).background(tint).padding(8.dp).animateContentSize(),
             ) {
-                c.preview.forEach { Text(it, color = Color(0xFFD7DAE0), fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 14.sp, maxLines = 1, overflow = TextOverflow.Clip) }
+                if (c.pv.isNotEmpty()) c.pv.forEach { Text(styled(it), fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 14.sp, maxLines = 1, overflow = TextOverflow.Clip) }
+                else c.preview.forEach { Text(it, color = Color(0xFFD7DAE0), fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 14.sp, maxLines = 1, overflow = TextOverflow.Clip) }
             }
         }
     }
 }
+
+private fun shortPath(p: String) = p.replace(Regex("^/home/[^/]+"), "~")
 
 // ---- the live terminal ----
 
@@ -250,6 +260,23 @@ private fun parseScreen(j: JSONObject): Screen {
         (0 until rs.length()).map { k -> rs.getJSONArray(k).let { Run(it.getString(0), it.getInt(1), it.getInt(2), it.getInt(3)) } }
     }
     return Screen(j.getLong("seq"), j.getInt("cols"), j.getInt("rows"), j.getInt("cx"), j.getInt("cy"), j.optBoolean("cv", true), j.optBoolean("alt"), j.str("title"), j.optInt("sb"), lines)
+}
+
+/** A line of runs as styled text, for the small previews on the cards. */
+private fun styled(runs: List<Run>): androidx.compose.ui.text.AnnotatedString = androidx.compose.ui.text.buildAnnotatedString {
+    for (r in runs) {
+        val bold = r.at and 1 != 0
+        var f = colorOf(r.fg, DEFAULT_FG, bold)
+        var b = if (r.bg >= 0) colorOf(r.bg, 0) else 0
+        if (r.at and 16 != 0) { val t = f; f = if (r.bg >= 0) b else DEFAULT_BG; b = t }
+        pushStyle(androidx.compose.ui.text.SpanStyle(
+            color = Color(f), background = if (b != 0) Color(b) else Color.Unspecified,
+            fontWeight = if (bold) androidx.compose.ui.text.font.FontWeight.Bold else null,
+            textDecoration = if (r.at and 8 != 0) androidx.compose.ui.text.style.TextDecoration.Underline else null,
+        ))
+        append(r.text)
+        pop()
+    }
 }
 
 private val ansi16 = intArrayOf(

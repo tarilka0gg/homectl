@@ -161,6 +161,14 @@ fn preview(snap: &Value) -> Vec<String> {
     tail
 }
 
+/// The same lines with their colours (runs of [text, fg, bg, attrs]), for the cards in the window list.
+fn preview_runs(snap: &Value) -> Vec<Value> {
+    let lines = snap["lines"].as_array().cloned().unwrap_or_default();
+    let mut tail: Vec<Value> = lines.into_iter().rev().skip_while(|l| plain(l).trim().is_empty()).take(6).collect();
+    tail.reverse();
+    tail
+}
+
 // ---- the list ----
 
 pub async fn list() -> impl IntoResponse {
@@ -198,6 +206,7 @@ pub async fn list() -> impl IntoResponse {
             card["kind"] = json!("terminal");
             card["term"] = json!(format!("p{p}"));
             card["preview"] = json!(preview(&s));
+            card["pv"] = json!(preview_runs(&s));
             card["cwd"] = s["cwd"].clone();
             card["cmd"] = s["cmd"].clone();
             card["cols"] = s["cols"].clone();
@@ -206,12 +215,14 @@ pub async fn list() -> impl IntoResponse {
         cards.push(card);
     }
     // wrapped terminals the compositor does not know (no niri, or another compositor)
-    for (p, s) in free {
+    let mut rest: Vec<(u32, Option<Value>)> = free.into_iter().collect();
+    rest.sort_by_key(|(p, _)| *p); // a stable order, or the cards would shuffle between refreshes
+    for (p, s) in rest {
         let Some(s) = s else { continue };
         cards.push(json!({
             "id": format!("p{p}"), "title": if s["title"].as_str().unwrap_or("").is_empty() { s["cmd"].clone() } else { s["title"].clone() },
             "app_id": "terminal", "workspace": null, "focused": false, "floating": false, "kind": "terminal",
-            "term": format!("p{p}"), "preview": preview(&s), "cwd": s["cwd"], "cmd": s["cmd"], "cols": s["cols"], "rows": s["rows"],
+            "term": format!("p{p}"), "preview": preview(&s), "pv": preview_runs(&s), "cwd": s["cwd"], "cmd": s["cmd"], "cols": s["cols"], "rows": s["rows"],
         }));
     }
     Json(json!({"niri": niri, "windows": cards}))
