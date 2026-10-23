@@ -1,19 +1,22 @@
 # Changelog
 
 All notable changes to homectl, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/), with
-`## Unreleased
+`## [version] - date` headings. The app and the daemon share one version number.
 
-- **The Windows list no longer depends on niri.** Windows come from the standard wlroots foreign-toplevel protocol, so any compositor that offers it works; workspaces and focus are not used, and the app no longer shows the desktop's focus.
-- **Every terminal window has an invisible name of its own** (24 bits of zero-width characters appended to its title by `homectl-pty`), so several windows of one ghostty process are told apart exactly. Wrappers started before this version show up as separate cards.
-- **Terminals mirror themselves.** New fish shells start inside `homectl-pty` through `packaging/shell/homectl.fish` (copy it to `~/.config/fish/conf.d/`). `homectl-attach` does the same for a shell that is already open. The new `homectl-adopt` helper (runs beside the daemon, started by `homectl-launch`) does it for you: it finds idle fish shells that are not wrapped yet, borrows the terminal's pty with `pidfd_getfd` and types `homectl-attach`. Needs yama `ptrace_scope` 0; off with `HOMECTL_NO_ADOPT=1` or `HOMECTL_NO_TERMINAL=1`.
-- The app says so when saved logins were lost on a reinstall (Android removes the keys), and no longer half-restores a backup.
+## [0.18.2] - 2026-10-23
 
-## [version] - date` headings. The app and the daemon share one version number.
-
-## [Unreleased]
+### Added
+- **The Windows tab no longer depends on niri.** Windows come from the standard wlroots foreign-toplevel protocol, so any compositor that offers it works; only title and app id are used, and the app no longer shows the desktop's focus.
+- **Every terminal window has an invisible name of its own** (24 bits of zero-width characters that `homectl-pty` appends to its title), so several windows of one ghostty process are told apart exactly. Wrappers started before this version show up as separate cards.
+- **Terminals mirror themselves.** New fish shells start inside `homectl-pty` through `packaging/shell/homectl.fish` (copy it to `~/.config/fish/conf.d/`); `homectl-attach` does the same for a shell that is already open. The new `homectl-adopt` helper, started by `homectl-launch`, does it for idle fish shells that were open before (it duplicates the terminal's pty with `pidfd_getfd` and types `homectl-attach`; needs yama `ptrace_scope` 0; off with `HOMECTL_NO_ADOPT=1` or `HOMECTL_NO_TERMINAL=1`).
+- **The terminal view has the Terminal tab's keys** (Esc, Tab, sticky Ctrl and Alt, arrows with auto-repeat, F1–F12, `^C` and friends, Paste, Copy, font size) and types straight into the terminal. The bottom dock slides away with the keyboard and back when it closes. A tap clicks for programs that ask for the mouse, and otherwise opens the keyboard.
 
 ### Fixed
+- Scrolling back through a terminal's history no longer snaps to the bottom whenever the screen changes.
+- The app says so when saved logins could not be opened after a reinstall (Android removes the keys), and no longer half-restores a backup; the "this phone isn't registered" message always says what to do.
 - OpenRC service: the daemon never started when `/var/log/homectl.log` did not exist yet (the supervisor opens it after dropping to the service user, so the service now creates it first).
+- The shell part never wraps a login shell or a Linux console (it would have stopped a tty1 login script from starting the compositor).
+- A refused device is logged with its id prefix, and every bring-to-front request is logged.
 
 ## [0.18.1] - 2026-10-23
 

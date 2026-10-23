@@ -51,6 +51,7 @@ Releases are on the **[Releases page](../../releases/latest)**:
 | `homectl-x.y.z.apk` | The Android app (Android 8 or newer) |
 | `homectl-linux-x86_64` | The daemon: a static binary that runs on any x86-64 Linux |
 | `homectl-pty` | The wrapper that mirrors a terminal window to the Windows tab (static, x86-64 Linux) |
+| `homectl-adopt` | Optional helper that moves terminals that were already open into the wrapper (see [docs/WINDOWS.md](docs/WINDOWS.md)) |
 | `homectl-send-android-arm64` | A tiny file uploader for Termux and ARM |
 | `SHA256SUMS` | Checksums |
 
@@ -108,7 +109,7 @@ Needs Rust for the daemon; the app needs JDK 17 and Android SDK platform 34 with
 ```
 cargo build --release && cargo test --release          # the daemon (needs a C compiler)
 packaging/build-static.sh                              # portable static musl build (zig and the official rustc)
-(cd zig && zig build -Doptimize=ReleaseSmall)          # homectl-send and homectl-pty (zig test pty.zig runs its tests)
+(cd zig && zig build -Doptimize=ReleaseSmall)          # homectl-send, homectl-pty and homectl-adopt (zig test pty.zig runs its tests)
 (cd android && ./gradlew :app:assembleRelease)         # the app
 ```
 
