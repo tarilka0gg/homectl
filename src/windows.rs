@@ -284,8 +284,16 @@ pub async fn close(Path(id): Path<String>) -> StatusCode {
     if std::env::var("HOMECTL_NO_DELETE").is_ok() {
         return StatusCode::FORBIDDEN;
     }
-    let Some(n) = window_for(&id).await else { return StatusCode::NOT_FOUND };
-    if crate::toplevels::close(n) { StatusCode::NO_CONTENT } else { StatusCode::BAD_GATEWAY }
+    if let Some(n) = window_for(&id).await {
+        return if crate::toplevels::close(n) { StatusCode::NO_CONTENT } else { StatusCode::BAD_GATEWAY };
+    }
+    // A wrapped terminal that no window title points to (a wrapper from before the window names, or a terminal that hides its
+    // title): hang it up. Its shell ends and an ordinary terminal closes the window. Only pids that are live wrappers qualify.
+    if let Some(pid) = term_pid(&id).filter(|p| wrapped_pids().contains(p)) {
+        unsafe { libc::kill(pid as i32, libc::SIGHUP) };
+        return StatusCode::NO_CONTENT;
+    }
+    StatusCode::NOT_FOUND
 }
 
 // ---- icons ----

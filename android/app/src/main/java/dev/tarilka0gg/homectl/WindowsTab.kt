@@ -132,6 +132,7 @@ private fun AppIcon(app: String, title: String, size: Int = 36) {
 
 @Composable
 fun WindowsScreen() {
+    val ctx = LocalContext.current
     val m = Hc.cur ?: return
     val scope = rememberCoroutineScope()
     // asked without Machine.call(): an older daemon answers 404, which must not mark the whole machine offline
@@ -198,7 +199,13 @@ fun WindowsScreen() {
             onDismissRequest = { closing = null },
             title = { Text("Close this window?") },
             text = { Text("“${c.title.ifBlank { c.app }}” will be closed on ${m.name}. Unsaved work in it may be lost.") },
-            confirmButton = { TextButton({ closing = null; scope.launch { Hc.post("/api/windows/${c.id}/close") } }) { Text("Close it") } },
+            confirmButton = { TextButton({
+                closing = null
+                scope.launch {
+                    val ok = Hc.post("/api/windows/${c.id}/close")
+                    android.widget.Toast.makeText(ctx, if (ok) "Close requested. Programs that ask first (unsaved work, a running command) show their question on ${m.name}." else "Could not close it: the machine refused or the window is already gone.", android.widget.Toast.LENGTH_LONG).show()
+                }
+            }) { Text("Close it") } },
             dismissButton = { TextButton({ closing = null }) { Text("Keep") } },
         )
     }
@@ -330,7 +337,7 @@ private fun TerminalView(c: WinCard, onBack: () -> Unit) {
         var seq = 0L
         var fails = 0
         while (true) {
-            val (code, j) = Hc.cur?.getSlow("/api/windows/${c.term}/screen?since=$seq&back=400&wait=12", 30_000) ?: (0 to null)
+            val (code, j) = Hc.cur?.getSlow("/api/windows/${c.term}/screen?since=$seq&back=1000&wait=12", 30_000) ?: (0 to null)
             if (j != null && !j.optBoolean("same")) {
                 runCatching { parseScreen(j) }.getOrNull()?.let { screen = it; seq = it.seq }
                 fails = 0; lost = false
@@ -388,7 +395,6 @@ private fun TerminalView(c: WinCard, onBack: () -> Unit) {
                 // a tap is a click for programs that asked for the mouse, and otherwise brings up the keyboard
                 if (s.mouse > 0) emit("\u001b[<0;${col + 1};${row + 1}M\u001b[<0;${col + 1};${row + 1}m") else showKeyboard()
             }
-            TypeCatcher(focus, ::emit)
         }
         TerminalKeys(
             mods, ::emit,
@@ -397,38 +403,26 @@ private fun TerminalView(c: WinCard, onBack: () -> Unit) {
             copy = { screen?.let { sc -> clip.setText(AnnotatedString(sc.lines.joinToString("\n") { l -> l.joinToString("") { it.text }.trimEnd() }.trimEnd())) } },
             smaller = { zoom = (zoom * 0.9f).coerceAtLeast(0.6f) }, bigger = { zoom = (zoom * 1.1f).coerceAtMost(2.2f) }, bottom = { jump++ },
         )
+        CommandBar(focus) { keys.trySend(it) }
     }
 }
 
 /** Ctrl and Alt stay pressed until the next key. */
 private class KeyMods { var ctrl by mutableStateOf(false); var alt by mutableStateOf(false); var more by mutableStateOf(false) }
 
-/** An invisible text field that takes what the phone's keyboard types and sends it on, one piece at a time. */
+/** The ordinary text box and Send button: type a line (or nothing, for just Enter) and send it with Enter. */
 @Composable
-private fun TypeCatcher(focus: FocusRequester, emit: (String) -> Unit) {
-    // a one-character anchor, so that Backspace has something to delete and shows up as a change
-    val anchor = "\u200b"
-    var tf by remember { mutableStateOf(TextFieldValue(anchor, TextRange(1))) }
-    BasicTextField(
-        tf,
-        { n ->
-            val t = n.text
-            if (t.length < anchor.length) emit("\u007f") else if (t != anchor) emit(t.removePrefix(anchor).replace("\n", "\r"))
-            tf = TextFieldValue(anchor, TextRange(1))
-        },
-        Modifier.size(1.dp).alpha(0f).focusRequester(focus).onPreviewKeyEvent { e ->
-            if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-            val seq = when (e.key) {
-                Key.Enter, Key.NumPadEnter -> "\r"; Key.Tab -> "\t"; Key.Escape -> "\u001b"; Key.Backspace -> "\u007f"
-                Key.DirectionUp -> "\u001b[A"; Key.DirectionDown -> "\u001b[B"; Key.DirectionRight -> "\u001b[C"; Key.DirectionLeft -> "\u001b[D"
-                Key.MoveHome -> "\u001b[H"; Key.MoveEnd -> "\u001b[F"; Key.PageUp -> "\u001b[5~"; Key.PageDown -> "\u001b[6~"; Key.Delete -> "\u001b[3~"
-                else -> null
-            }
-            if (seq != null) { emit(seq); true } else false
-        },
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false, imeAction = androidx.compose.ui.text.input.ImeAction.Send),
-        keyboardActions = KeyboardActions(onSend = { emit("\r") }),
-    )
+private fun CommandBar(focus: FocusRequester, send: (String) -> Unit) {
+    var text by remember { mutableStateOf("") }
+    fun go() { send(text + "\r"); text = "" }
+    Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer).padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        OutlinedTextField(
+            text, { text = it }, Modifier.weight(1f).focusRequester(focus), singleLine = true, placeholder = { Text("Type a command") },
+            keyboardOptions = KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Send, autoCorrectEnabled = false),
+            keyboardActions = KeyboardActions(onSend = { go() }),
+        )
+        IconButton({ go() }) { Icon(Icons.Default.Send, "Send") }
+    }
 }
 
 @Composable
@@ -453,9 +447,10 @@ private fun ScreenCanvas(s: Screen, zoom: Float, jump: Int, onCell: (Int, Int) -
         val totalH = ch * s.lines.size + 8f
         // follow the bottom unless the person scrolled up; scrolling back down to the end follows again
         var follow by remember { mutableStateOf(true) }
-        LaunchedEffect(vScroll.isScrollInProgress) { if (!vScroll.isScrollInProgress) follow = vScroll.maxValue - vScroll.value < ch * 2 }
+        // only a finger (or a fling) decides whether to keep following; the content growing must not, or the view would stay at the top
+        LaunchedEffect(Unit) { snapshotFlow { vScroll.isScrollInProgress to vScroll.value }.collect { (moving, _) -> if (moving) follow = vScroll.maxValue - vScroll.value < ch * 2 } }
         LaunchedEffect(jump) { if (jump > 0) { follow = true; vScroll.scrollTo(vScroll.maxValue) } }
-        LaunchedEffect(s.seq, totalH) { if (follow) vScroll.scrollTo(vScroll.maxValue) }
+        LaunchedEffect(s.seq, totalH) { if (follow && !vScroll.isScrollInProgress) vScroll.scrollTo(vScroll.maxValue) }
         Box(Modifier.fillMaxSize().verticalScroll(vScroll).horizontalScroll(hScroll).pointerInput(cw, ch, s.sb, s.cols, s.rows) {
             detectTapGestures { o ->
                 val col = ((o.x - 4f) / cw).toInt().coerceIn(0, s.cols - 1)
