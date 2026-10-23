@@ -14,8 +14,8 @@
   .keys button{flex:none;min-width:40px;padding:8px 9px;border:0;border-radius:8px;background:#2a313c;color:#e6edf3;font:13px monospace;touch-action:manipulation}
   .keys button.on{background:#3b82f6}
   .keys button.tool{background:#25303f}
-  /* short panes (split view): keep only the first row of keys, '⋯' brings the tools row back */
-  @media (max-height: 420px){ #keys2{display:none} body.tools #keys2{display:flex} }
+  /* the tools row (keyboard, paste, copy, ^C…) is hidden until '⋯' is pressed, and opens ABOVE the main row of keys, as in the Windows tab */
+  #keys2{display:none} body.tools #keys2{display:flex}
   #msg{position:fixed;top:6px;right:6px;padding:6px 10px;border-radius:8px;background:#7f1d1d;color:#fff;display:none;z-index:5}
   #toast{position:fixed;bottom:110px;left:50%;transform:translateX(-50%);padding:8px 14px;border-radius:16px;background:#333c;color:#fff;display:none;z-index:6}
   #buf{position:fixed;top:0;left:0;right:0;bottom:0;background:#0b0f14;display:none;flex-direction:column;z-index:10}
@@ -27,8 +27,8 @@
 </style>
 <div id="wrap">
   <div id="term"></div>
-  <div class="keys" id="keys1"></div>
   <div class="keys" id="keys2"></div>
+  <div class="keys" id="keys1"></div>
 </div>
 <div id="msg"></div>
 <div id="toast"></div>

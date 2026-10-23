@@ -640,12 +640,12 @@ private fun TerminalKeys(
         }
     }
     Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer).padding(horizontal = 6.dp, vertical = 5.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            keysMain.forEach { KeyButton(it, (it.act == "ctrl" && mods.ctrl) || (it.act == "alt" && mods.alt) || (it.act == "more" && mods.more), ::run) }
-        }
-        // the second row opens under the first, as in the Terminal tab
+        // the tools row opens ABOVE the main row (the Terminal tab does the same)
         androidx.compose.animation.AnimatedVisibility(mods.more) {
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) { keysTools.forEach { KeyButton(it, it.act == "live" && live, ::run) } }
+        }
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            keysMain.forEach { KeyButton(it, (it.act == "ctrl" && mods.ctrl) || (it.act == "alt" && mods.alt) || (it.act == "more" && mods.more), ::run) }
         }
     }
 }

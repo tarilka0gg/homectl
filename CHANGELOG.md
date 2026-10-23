@@ -3,6 +3,11 @@
 All notable changes to homectl, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/), with
 `## [version] - date` headings. The app and the daemon share one version number.
 
+## [0.18.6] - 2026-10-24
+
+### Changed
+- **The Terminal tab's key rows now work like the Windows tab's**: only the main row shows, and `⋯` opens the tools row (keyboard, paste, copy, select, buffer, font size, `^C`…) **above** it. In the Windows tab it is the same, so the two match.
+
 ## [0.18.5] - 2026-10-24
 
 ### Changed
