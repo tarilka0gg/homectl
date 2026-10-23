@@ -9,6 +9,8 @@ const std = @import("std");
 const linux = std.os.linux;
 
 const A = std.heap.page_allocator;
+/// Everything one scan allocates lives in an arena that is freed when the scan ends (a scan runs every three seconds).
+var ar: std.mem.Allocator = A;
 const idle_secs = 8;
 const SYS_pidfd_open = 434;
 const SYS_pidfd_getfd = 438;
@@ -38,14 +40,14 @@ fn list(path: [:0]const u8, out: *std.ArrayList([]u8)) void {
         while (off < n) {
             const d: *align(1) linux.dirent64 = @ptrCast(&buf[off]);
             const name = std.mem.sliceTo(@as([*:0]u8, @ptrCast(&d.name)), 0);
-            if (name.len > 0 and name[0] != '.') out.append(A, A.dupe(u8, name) catch return) catch return;
+            if (name.len > 0 and name[0] != '.') out.append(ar, ar.dupe(u8, name) catch return) catch return;
             off += d.reclen;
         }
     }
 }
 
 fn pathz(comptime fmt: []const u8, args: anytype) [:0]u8 {
-    return std.fmt.allocPrintSentinel(A, fmt, args, 0) catch @panic("oom");
+    return std.fmt.allocPrintSentinel(ar, fmt, args, 0) catch @panic("oom");
 }
 
 fn isNum(s: []const u8) bool {
@@ -132,10 +134,13 @@ fn typeInto(m: Master, text: []const u8) bool {
 var tried: std.AutoHashMap(i64, void) = undefined;
 
 fn scan(verbose: bool) void {
+    var arena = std.heap.ArenaAllocator.init(A);
+    defer arena.deinit();
+    ar = arena.allocator();
     var pids: std.ArrayList([]u8) = .empty;
     list("/proc", &pids);
     var live: std.ArrayList([]u8) = .empty;
-    for (pids.items) |p| if (isNum(p)) live.append(A, p) catch return;
+    for (pids.items) |p| if (isNum(p)) live.append(ar, p) catch return;
     for (live.items) |pid| {
         var cb: [32]u8 = undefined;
         if (!std.mem.eql(u8, std.mem.trim(u8, readFile(pathz("/proc/{s}/comm", .{pid}), &cb), "\n"), "fish")) continue;
