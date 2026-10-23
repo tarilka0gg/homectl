@@ -16,6 +16,7 @@ mod swr;
 mod sys;
 mod tls;
 mod term;
+mod windows;
 
 use axum::{
     extract::{ConnectInfo, Path, Query, Request, State, WebSocketUpgrade},
@@ -790,6 +791,12 @@ async fn main() {
         .route("/power/{action}", post(power_post))
         .route("/procs", get(procs))
         .route("/procs/{pid}/{sig}", post(proc_signal))
+        .route("/windows", get(windows::list))
+        .route("/windows/{id}/screen", get(windows::screen))
+        .route("/windows/{id}/input", post(windows::input))
+        .route("/windows/{id}/focus", post(windows::focus))
+        .route("/windows/{id}/close", post(windows::close))
+        .route("/window-icon/{app_id}", get(windows::icon))
         .route("/term/sessions", get(term_list))
         .route("/term/shells", get(term_shells))
         .route("/displays", get(displays_get))

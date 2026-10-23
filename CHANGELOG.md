@@ -5,6 +5,17 @@ All notable changes to homectl, newest first. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-23
+
+### Added
+- **Windows tab.** The windows open on the machine's desktop as data, not pixels: title, app, icon, workspace and focus for every niri window, with bring-to-front and close. Cards open and close with an animation, and the focused window is outlined.
+- **`homectl-pty`**, a small static Zig program that runs your shell inside a terminal window and mirrors its screen. A mirrored terminal shows its real text, colours, true colour, wide characters, cursor, title and scrollback on the phone, live, and you can type into it with a key row (Esc, Tab, Ctrl-C, arrows, Home/End, PgUp/PgDn). Full-screen programs (less, vim, htop) work.
+- `docs/WINDOWS.md` describes the format; `/api/windows`, `/api/windows/{id}/screen|input|focus|close` and `/api/window-icon/{app}`.
+- Tests: eight for the terminal screen model in Zig (including random-input fuzzing with safety checks on), three for the daemon side.
+
+### Changed
+- The OpenRC service starts the daemon through a small launcher that restarts it once your sound server is up after login, so audio, clipboard and screen controls work after a reboot without a manual restart. `cloudflared` is also found in `~/.local/bin`.
+
 ## [0.17.1] - 2026-10-22
 
 ### Added

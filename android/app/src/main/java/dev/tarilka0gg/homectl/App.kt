@@ -28,6 +28,7 @@ private enum class Tab(val label: String, val icon: ImageVector) {
     Monitor("Monitor", Icons.Default.Info),
     Controls("Controls", Icons.Default.Settings),
     Terminal("Terminal", Icons.Default.PlayArrow),
+    Windows("Windows", WindowsIcon),
     Files("Files", Icons.Default.Menu),
     System("System", Icons.Default.Build),
 }
@@ -42,7 +43,7 @@ fun App() {
     val restored = remember { mutableStateMapOf<Tab, Boolean>() }
     LaunchedEffect(tab) {
         val st = scrolls[tab] ?: return@LaunchedEffect
-        if (tab == Tab.Terminal || tab == Tab.Files) return@LaunchedEffect
+        if (tab == Tab.Terminal || tab == Tab.Files || tab == Tab.Windows) return@LaunchedEffect
         if (restored[tab] != true) {
             val want = Hc.memInt("scroll.${tab.name}")
             var tries = 0
@@ -97,8 +98,8 @@ fun App() {
             }
         },
     ) { pad ->
-        if (tab == Tab.Terminal || tab == Tab.Files) {
-            Box(Modifier.padding(pad).fillMaxSize()) { if (tab == Tab.Terminal) TerminalScreen() else FilesScreen() }
+        if (tab == Tab.Terminal || tab == Tab.Files || tab == Tab.Windows) {
+            Box(Modifier.padding(pad).fillMaxSize()) { when (tab) { Tab.Terminal -> TerminalScreen(); Tab.Windows -> WindowsScreen(); else -> FilesScreen() } }
         } else {
             Column(Modifier.padding(pad).fillMaxSize().verticalScroll(scrolls.getValue(tab)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 when (tab) {
@@ -106,7 +107,7 @@ fun App() {
                     Tab.Controls -> ControlsScreen()
                     Tab.Files -> {}
                     Tab.System -> SystemScreen { adding = true }
-                    Tab.Terminal -> {}
+                    Tab.Terminal, Tab.Windows -> {}
                 }
             }
         }

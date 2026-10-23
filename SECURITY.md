@@ -21,9 +21,16 @@ You will get an answer within a few days; fixes ship as a new release and are cr
 - **Not covered:** a compromised phone that is unlocked; request bodies aren't signed (they travel inside TLS); the tunnel's TLS is
   terminated by Cloudflare, which can see that traffic; free quick tunnels have no uptime guarantee.
 
+## Windows
+
+The Windows tab lists window titles and can show and type into terminals started through `homectl-pty`, so it carries the same
+risk as the terminal: whoever holds the token (and, through the tunnel, a registered phone) can read and type into those
+windows. The wrapper's socket lives in a private directory of the user (`$XDG_RUNTIME_DIR/homectl/win`, mode 0700; the socket
+is 0600), so other users on the machine cannot reach it. See [docs/WINDOWS.md](docs/WINDOWS.md).
+
 ## Hardening checklist
 
-`HOMECTL_NO_TERMINAL=1` disables the terminal, `HOMECTL_NO_DELETE=1` file deletion, `HOMECTL_NO_EDIT=1` file saving,
+`HOMECTL_NO_TERMINAL=1` disables the terminal and the mirroring of terminal windows, `HOMECTL_NO_DELETE=1` file deletion and closing windows, `HOMECTL_NO_EDIT=1` file saving,
 `HOMECTL_TUNNEL=off` the tunnel, `HOMECTL_NO_RENDEZVOUS=1` the tunnel-address announcements.
 
 ## Supported versions

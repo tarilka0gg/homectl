@@ -15,6 +15,7 @@ your Wi-Fi, Tailscale or, when you are away from home, a tunnel that only a phon
 | **Monitor** | btop-style live view: CPU (per-core load, temperature, clocks, governor, throttling), every GPU, memory and swap, **per-disk activity** (busy %, read/write, IOPS, temperature, partitions, the processes using the disk, and a fast "what takes the space" view with open and delete), network, battery health and power draw, pressure (PSI), every hwmon sensor, fans and a sortable, searchable process table with terminate / kill / pause. Several machines side by side |
 | **Controls** | Screens off/on and **brightness for every screen** (built-in panel and DDC/CI monitors), Govee lights with a **colour wheel** and white temperature (per light and for all), Wi-Fi, Bluetooth, airplane mode, a per-device and **per-app audio mixer**, webcam controls, the public-tunnel switch |
 | **Terminal** | A real shell (xterm.js) that **keeps running on the machine**: leave, close the app, lose Wi-Fi, and reattach to the same screen. Pick the shell, several sessions, split view, key rows, scrollback buffer, an SSH shortcut |
+| **Windows** | What is open on the machine's desktop, as **data rather than pixels**: title, app, icon, workspace and focus for every window (niri), bring to front and close. Terminals started through `homectl-pty` are **mirrored live** (real text, colours, scrollback) and you can type into them. See [docs/WINDOWS.md](docs/WINDOWS.md) |
 | **Files** | Thumbnails and icons, **a path you can type**, **search**, back / forward (gestures too), **a preview for every type** (images, text, PDF, video, audio, hex), **text editing**, rename, delete, upload, look inside archives and unzip, and **details** (owner, permissions, dates, checksums, image size). The machines also appear in Android's own file picker |
 | **System** | Power modes (your own on/off scripts), services, lock / suspend / reboot / power off, a **clipboard** with pickers to send and get (text *and* pictures, plus Noctalia's history) and an optional **common clipboard** as a background service, send files, a connection test and the **Security** section |
 
@@ -49,6 +50,7 @@ Releases are on the **[Releases page](../../releases/latest)**:
 |---|---|
 | `homectl-x.y.z.apk` | The Android app (Android 8 or newer) |
 | `homectl-linux-x86_64` | The daemon: a static binary that runs on any x86-64 Linux |
+| `homectl-pty` | The wrapper that mirrors a terminal window to the Windows tab (static, x86-64 Linux) |
 | `homectl-send-android-arm64` | A tiny file uploader for Termux and ARM |
 | `SHA256SUMS` | Checksums |
 
@@ -106,7 +108,7 @@ Needs Rust for the daemon; the app needs JDK 17 and Android SDK platform 34 with
 ```
 cargo build --release && cargo test --release          # the daemon (needs a C compiler)
 packaging/build-static.sh                              # portable static musl build (zig and the official rustc)
-(cd zig && zig build -Doptimize=ReleaseSmall)          # homectl-send
+(cd zig && zig build -Doptimize=ReleaseSmall)          # homectl-send and homectl-pty (zig test pty.zig runs its tests)
 (cd android && ./gradlew :app:assembleRelease)         # the app
 ```
 
@@ -116,7 +118,7 @@ Without a keystore the app is signed with the Android debug key; set `HOMECTL_KE
 | path | role |
 |---|---|
 | `src/` | the Rust daemon (axum): monitor, files, terminal, clipboard, relay, device keys, TLS |
-| `csrc/`, `zig/` | C shims (V4L2 webcam, PTY) and the Zig uploader |
+| `csrc/`, `zig/` | C shims (V4L2 webcam, PTY) and the Zig uploader and terminal mirror (`homectl-pty`) |
 | `android/` | the Kotlin + Compose app |
 | `packaging/` | the OpenRC service, the static build and the release-signing script |
 | `docs/` | the away-from-home design, signing notes, screenshots |
