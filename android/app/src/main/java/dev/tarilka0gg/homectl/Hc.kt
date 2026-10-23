@@ -513,6 +513,9 @@ object Hc {
     /** Last open tab, so coming back to the app lands where you left. */
     /** True while the terminal view's keyboard is up: the bottom dock slides away and comes back when it closes. */
     var dockHidden by mutableStateOf(false)
+
+    /** True while the soft keyboard is up (measured from the visible window area, which works however the keyboard was closed). */
+    var imeUp by mutableStateOf(false)
     var lastTab by mutableIntStateOf(0)
 
     fun setSpeed(ms: Int) { speedMs = ms; prefs.edit().putInt("speed", ms).apply() }

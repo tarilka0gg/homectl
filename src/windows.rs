@@ -220,7 +220,7 @@ pub async fn screen(Path(id): Path<String>, Query(q): Query<ScreenQ>) -> Respons
     if std::env::var("HOMECTL_NO_TERMINAL").is_ok() {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let back = q.back.unwrap_or(200).min(1000);
+    let back = q.back.unwrap_or(200).min(5000);
     let Ok(mut s) = UnixStream::connect(term_path(pid)).await else { return StatusCode::NOT_FOUND.into_response() };
     if !send_frame(&mut s, b'W', &back.to_le_bytes()).await {
         return StatusCode::BAD_GATEWAY.into_response();

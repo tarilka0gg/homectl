@@ -15,7 +15,7 @@ const std = @import("std");
 const linux = std.os.linux;
 
 const A = std.heap.page_allocator;
-const scrollback_cap = 1000;
+const scrollback_cap = 5000;
 
 const Cell = struct { cp: u21 = ' ', fg: i32 = -1, bg: i32 = -1, at: u8 = 0 };
 const BOLD = 1;
@@ -655,6 +655,8 @@ fn snapshot(t: *Term, back_want: usize, pid: i32, cmd: []const u8) Buf {
     b.str(cmd);
     b.s(",\"sb\":");
     b.num(nb);
+    b.s(",\"sbt\":");
+    b.num(t.back_len); // all the history there is, so the app knows when to ask for more
     b.s(",\"lines\":[");
     var first = true;
     var k: usize = nb;

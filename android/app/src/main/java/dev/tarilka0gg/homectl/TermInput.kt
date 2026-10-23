@@ -76,6 +76,12 @@ class TermInput(ctx: Context, private val out: (String) -> Unit) : View(ctx) {
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean = key(event) || super.onKeyDown(keyCode, event)
 
-    fun show() { requestFocus(); (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(this, 0) }
+    fun show() {
+        requestFocus()
+        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        // after the keyboard was closed the view still has focus, and a plain show request is ignored; restart the input first
+        imm.restartInput(this)
+        post { imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT); androidx.core.view.ViewCompat.getWindowInsetsController(this)?.show(androidx.core.view.WindowInsetsCompat.Type.ime()) }
+    }
     fun hide() { (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(windowToken, 0) }
 }

@@ -21,6 +21,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -278,7 +279,7 @@ private fun cpWidth(cp: Int): Int = when {
 
 private class Screen(
     val seq: Long, val cols: Int, val rows: Int, val cx: Int, val cy: Int, val cursor: Boolean, val alt: Boolean,
-    val title: String, val sb: Int, val lines: List<List<Run>>, val mouse: Int = 0,
+    val title: String, val sb: Int, val lines: List<List<Run>>, val mouse: Int = 0, val sbt: Int = 0,
 )
 
 private fun parseScreen(j: JSONObject): Screen {
@@ -287,7 +288,7 @@ private fun parseScreen(j: JSONObject): Screen {
         val rs: JSONArray = ls.getJSONArray(i)
         (0 until rs.length()).map { k -> rs.getJSONArray(k).let { Run(it.getString(0), it.getInt(1), it.getInt(2), it.getInt(3)) } }
     }
-    return Screen(j.getLong("seq"), j.getInt("cols"), j.getInt("rows"), j.getInt("cx"), j.getInt("cy"), j.optBoolean("cv", true), j.optBoolean("alt"), j.str("title"), j.optInt("sb"), lines, j.optInt("mouse"))
+    return Screen(j.getLong("seq"), j.getInt("cols"), j.getInt("rows"), j.getInt("cx"), j.getInt("cy"), j.optBoolean("cv", true), j.optBoolean("alt"), j.str("title"), j.optInt("sb"), lines, j.optInt("mouse"), j.optInt("sbt"))
 }
 
 /** A line of runs as styled text, for the small previews on the cards. */
@@ -325,19 +326,54 @@ private fun colorOf(v: Int, default: Int, bold: Boolean = false): Int = when {
     else -> (0xFF shl 24) or (v - 256)
 }
 
+/** A selection of terminal text: two (line, column) points in the order they were pressed. */
+private class Sel(val a: Pair<Int, Int>, val b: Pair<Int, Int>) {
+    val from get() = if (a.first < b.first || (a.first == b.first && a.second <= b.second)) a else b
+    val to get() = if (from === a) b else a
+}
+
+/** One entry per screen cell (a wide character is followed by an empty one), so columns can be turned into text exactly. */
+private fun cellsOf(runs: List<Run>): List<String> {
+    val out = ArrayList<String>()
+    for (r in runs) {
+        var i = 0
+        while (i < r.text.length) {
+            val cp = r.text.codePointAt(i)
+            val n = Character.charCount(cp)
+            val w = cpWidth(cp)
+            if (w > 0) { out.add(String(Character.toChars(cp))); repeat(w - 1) { out.add("") } }
+            i += n
+        }
+    }
+    return out
+}
+
+private fun selectedText(s: Screen, sel: Sel): String {
+    val f = sel.from; val t = sel.to
+    return (f.first..t.first.coerceAtMost(s.lines.size - 1)).joinToString("\n") { l ->
+        val cells = cellsOf(s.lines.getOrElse(l) { emptyList() })
+        val lo = if (l == f.first) f.second else 0
+        val hi = if (l == t.first) t.second else cells.size - 1
+        if (lo >= cells.size) "" else cells.subList(lo.coerceAtLeast(0), (hi + 1).coerceAtMost(cells.size)).joinToString("").trimEnd()
+    }.trimEnd()
+}
+
 @Composable
 private fun TerminalView(c: WinCard, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
+    val ctx = LocalContext.current
     var screen by remember(c.term) { mutableStateOf<Screen?>(null) }
     var lost by remember(c.term) { mutableStateOf(false) }
     val keys = remember(c.term) { Channel<String>(Channel.UNLIMITED) }
+    // how many lines of history are asked for: a few at first, more as you scroll up towards the top (the machine keeps 5000)
+    var back by remember(c.term) { mutableIntStateOf(300) }
 
     // the machine pushes a change as soon as it happens; this just keeps asking until something differs
-    LaunchedEffect(c.term) {
+    LaunchedEffect(c.term, back) {
         var seq = 0L
         var fails = 0
         while (true) {
-            val (code, j) = Hc.cur?.getSlow("/api/windows/${c.term}/screen?since=$seq&back=1000&wait=12", 30_000) ?: (0 to null)
+            val (code, j) = Hc.cur?.getSlow("/api/windows/${c.term}/screen?since=$seq&back=$back&wait=12", 30_000) ?: (0 to null)
             if (j != null && !j.optBoolean("same")) {
                 runCatching { parseScreen(j) }.getOrNull()?.let { screen = it; seq = it.seq }
                 fails = 0; lost = false
@@ -355,10 +391,15 @@ private fun TerminalView(c: WinCard, onBack: () -> Unit) {
     val mods = remember { KeyMods() }
     var zoom by remember { mutableFloatStateOf(1f) }
     var jump by remember { mutableIntStateOf(0) }
+    var fitReq by remember { mutableIntStateOf(0) }
+    var live by remember { mutableStateOf(false) } // typing goes out letter by letter instead of as a line
+    var sel by remember { mutableStateOf<Sel?>(null) }
     var input by remember { mutableStateOf<TermInput?>(null) }
+    val focus = remember { FocusRequester() }
+    val kb = LocalSoftwareKeyboardController.current
     val clip = LocalClipboardManager.current
     // the bottom dock slides away while the keyboard is up and comes back when it closes
-    val imeUp = WindowInsets.isImeVisible
+    val imeUp = Hc.imeUp
     LaunchedEffect(imeUp) { Hc.dockHidden = imeUp }
     DisposableEffect(Unit) { onDispose { Hc.dockHidden = false } }
 
@@ -372,7 +413,15 @@ private fun TerminalView(c: WinCard, onBack: () -> Unit) {
         keys.trySend(t)
     }
     emitRef.value = ::emit
-    fun showKeyboard() { input?.show() }
+    val host = androidx.compose.ui.platform.LocalView.current
+    val imm = remember { ctx.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager }
+    // The text box keeps its focus when the keyboard is closed, and Compose's own show() is then ignored: restart the input session
+    // and ask the system directly.
+    fun showKeyboard() {
+        if (live) input?.show()
+        else { focus.requestFocus(); host.post { imm.restartInput(host); imm.showSoftInput(host, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT); kb?.show() } }
+    }
+    fun hideKeyboard() { if (live) input?.hide() else { imm.hideSoftInputFromWindow(host.windowToken, 0); kb?.hide() } }
 
     Column(Modifier.fillMaxSize().imePadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -392,58 +441,113 @@ private fun TerminalView(c: WinCard, onBack: () -> Unit) {
         Box(Modifier.weight(1f).fillMaxWidth().background(Color(DEFAULT_BG))) {
             val s = screen
             if (s == null) CircularProgressIndicator(Modifier.align(Alignment.Center))
-            else ScreenCanvas(s, zoom, jump) { col, row ->
-                // a tap is a click for programs that asked for the mouse, and otherwise brings up the keyboard
-                if (s.mouse > 0) emit("\u001b[<0;${col + 1};${row + 1}M\u001b[<0;${col + 1};${row + 1}m") else showKeyboard()
+            else ScreenCanvas(
+                s, zoom, jump, fitReq, sel, onFit = { zoom = it },
+                onCell = { col, row ->
+                    // a tap is a click for programs that asked for the mouse, and otherwise brings up the keyboard
+                    if (sel != null) sel = null
+                    else if (s.mouse > 0) emit("\u001b[<0;${col + 1};${row + 1}M\u001b[<0;${col + 1};${row + 1}m") else showKeyboard()
+                },
+                onNearTop = { if (s.sbt > s.sb && back < 5000) back = minOf(5000, maxOf(back * 2, back + 500)) },
+                onSelect = { sel = it },
+            )
+            if (live) androidx.compose.ui.viewinterop.AndroidView({ c0 -> TermInput(c0) { t -> emitRef.value(t) }.also { input = it } }, Modifier.size(1.dp))
+            sel?.let { sl ->
+                Row(Modifier.align(Alignment.BottomCenter).padding(12.dp).clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.inverseSurface).padding(horizontal = 6.dp)) {
+                    TextButton({
+                        screen?.let { sc -> clip.setText(AnnotatedString(selectedText(sc, sl))) }
+                        android.widget.Toast.makeText(ctx, "Copied", android.widget.Toast.LENGTH_SHORT).show(); sel = null
+                    }) { Text("Copy", color = MaterialTheme.colorScheme.inversePrimary) }
+                    TextButton({ sel = null }) { Text("Cancel", color = MaterialTheme.colorScheme.inverseOnSurface) }
+                }
             }
-            androidx.compose.ui.viewinterop.AndroidView({ c -> TermInput(c) { t -> emitRef.value(t) }.also { input = it } }, Modifier.size(1.dp))
         }
         TerminalKeys(
-            mods, ::emit,
-            toggleKeyboard = { if (imeUp) input?.hide() else showKeyboard() },
+            mods, ::emit, live,
+            toggleKeyboard = { if (Hc.imeUp) hideKeyboard() else showKeyboard() }, // read live: a captured value would be from an earlier moment
+            toggleLive = { live = !live; sel = null },
+            fit = { fitReq++ },
             paste = { clip.getText()?.text?.takeIf { it.isNotEmpty() }?.let { emit(it) } },
             copy = { screen?.let { sc -> clip.setText(AnnotatedString(sc.lines.joinToString("\n") { l -> l.joinToString("") { it.text }.trimEnd() }.trimEnd())) } },
-            smaller = { zoom = (zoom * 0.9f).coerceAtLeast(0.6f) }, bigger = { zoom = (zoom * 1.1f).coerceAtMost(2.2f) }, bottom = { jump++ },
+            smaller = { zoom = (zoom * 0.9f).coerceAtLeast(0.5f) }, bigger = { zoom = (zoom * 1.1f).coerceAtMost(2.5f) }, bottom = { jump++ },
         )
+        if (!live) CommandBar(focus) { keys.trySend(it) }
     }
 }
 
 /** Ctrl and Alt stay pressed until the next key. */
 private class KeyMods { var ctrl by mutableStateOf(false); var alt by mutableStateOf(false); var more by mutableStateOf(false) }
 
+/** The ordinary text box and Send button: a line is typed here, with the cursor where you tap, and goes out with Enter. */
 @Composable
-private fun ScreenCanvas(s: Screen, zoom: Float, jump: Int, onCell: (Int, Int) -> Unit) {
+private fun CommandBar(focus: FocusRequester, send: (String) -> Unit) {
+    var text by remember { mutableStateOf("") }
+    fun go() { send(text + "\r"); text = "" }
+    Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer).padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        OutlinedTextField(
+            text, { text = it }, Modifier.weight(1f).focusRequester(focus), singleLine = true, placeholder = { Text("Type a command") },
+            keyboardOptions = KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Send, autoCorrectEnabled = false),
+            keyboardActions = KeyboardActions(onSend = { go() }),
+        )
+        IconButton({ go() }) { Icon(Icons.Default.Send, "Send") }
+    }
+}
+
+/** Font size is a fixed, readable 13 sp (what the Terminal tab uses); wide windows scroll sideways instead of shrinking. */
+private const val BASE_SP = 13f
+
+@Composable
+private fun ScreenCanvas(
+    s: Screen, zoom: Float, jump: Int, fitReq: Int, sel: Sel?, onFit: (Float) -> Unit,
+    onCell: (Int, Int) -> Unit, onNearTop: () -> Unit, onSelect: (Sel?) -> Unit,
+) {
     val density = LocalDensity.current
     val blink by rememberInfiniteTransition(label = "cursor").animateFloat(0.25f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "blink")
     val vScroll = rememberScrollState()
     val hScroll = rememberScrollState()
+    val screenNow by rememberUpdatedState(s)
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val vw = maxWidth
         val vh = maxHeight
-        val minPx = with(density) { 9.sp.toPx() }
         val probe = remember { Paint().apply { typeface = Typeface.MONOSPACE } }
         probe.textSize = 100f
         val ratio = probe.measureText("M") / 100f
         val availW = with(density) { vw.toPx() } - 8f
-        val fit = availW / (s.cols * ratio)
-        val px = maxOf(fit, minPx).coerceAtMost(with(density) { 16.sp.toPx() }) * zoom
+        val basePx = with(density) { BASE_SP.sp.toPx() }
+        val px = basePx * zoom
         val cw = px * ratio
         val ch = px * 1.25f
         val totalW = cw * s.cols + 8f
         val totalH = ch * s.lines.size + 8f
+        LaunchedEffect(fitReq) { if (fitReq > 0) onFit((availW / (s.cols * ratio) / basePx).coerceIn(0.4f, 2.5f)) }
         // follow the bottom unless the person scrolled up; scrolling back down to the end follows again
         var follow by remember { mutableStateOf(true) }
         // only a finger (or a fling) decides whether to keep following; the content growing must not, or the view would stay at the top
         LaunchedEffect(Unit) { snapshotFlow { vScroll.isScrollInProgress to vScroll.value }.collect { (moving, _) -> if (moving) follow = vScroll.maxValue - vScroll.value < ch * 2 } }
+        // near the top of what is loaded: ask the machine for more history
+        LaunchedEffect(Unit) { snapshotFlow { vScroll.value }.collect { v -> if (v < ch * 80) onNearTop() } }
         LaunchedEffect(jump) { if (jump > 0) { follow = true; vScroll.scrollTo(vScroll.maxValue) } }
         LaunchedEffect(s.seq, totalH) { if (follow && !vScroll.isScrollInProgress) vScroll.scrollTo(vScroll.maxValue) }
-        Box(Modifier.fillMaxSize().verticalScroll(vScroll).horizontalScroll(hScroll).pointerInput(cw, ch, s.sb, s.cols, s.rows) {
-            detectTapGestures { o ->
-                val col = ((o.x - 4f) / cw).toInt().coerceIn(0, s.cols - 1)
-                val row = ((o.y - 4f) / ch).toInt() - s.sb
-                onCell(col, row.coerceIn(0, s.rows - 1))
-            }
-        }) {
+        fun cellAt(o: Offset) = (((o.y - 4f) / ch).toInt().coerceIn(0, (screenNow.lines.size - 1).coerceAtLeast(0))) to (((o.x - 4f) / cw).toInt().coerceIn(0, screenNow.cols - 1))
+        var anchor by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+        val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+        Box(
+            Modifier.fillMaxSize().verticalScroll(vScroll).horizontalScroll(hScroll)
+                .pointerInput(cw, ch, s.sb, s.cols, s.rows) {
+                    detectTapGestures { o ->
+                        val (line, col) = cellAt(o)
+                        onCell(col, (line - screenNow.sb).coerceIn(0, screenNow.rows - 1))
+                    }
+                }
+                .pointerInput(cw, ch) {
+                    // press and hold, then drag: selects text; the Copy bar appears on the screen
+                    detectDragGesturesAfterLongPress(
+                        onDragStart = { o -> anchor = cellAt(o); onSelect(Sel(anchor!!, anchor!!)); haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress) },
+                        onDrag = { change, _ -> change.consume(); anchor?.let { onSelect(Sel(it, cellAt(change.position))) } },
+                        onDragEnd = { anchor = null }, onDragCancel = { anchor = null },
+                    )
+                },
+        ) {
             val h = with(density) { totalH.toDp() }
             val w = with(density) { totalW.toDp() }
             androidx.compose.foundation.Canvas(Modifier.size(w.coerceAtLeast(vw), h.coerceAtLeast(vh))) {
@@ -484,6 +588,14 @@ private fun ScreenCanvas(s: Screen, zoom: Float, jump: Int, onCell: (Int, Int) -
                         }
                     }
                 }
+                sel?.let { sl ->
+                    val f = sl.from; val t = sl.to
+                    for (line in f.first..t.first) {
+                        val lo = if (line == f.first) f.second else 0
+                        val hi = if (line == t.first) t.second else s.cols - 1
+                        drawRect(Color(0x663D7EFF), Offset(4f + lo * cw, 4f + line * ch), Size((hi - lo + 1) * cw, ch))
+                    }
+                }
                 if (s.cursor) {
                     val row = s.sb + s.cy
                     drawRect(Color(0xFF8AB4F8).copy(alpha = blink), Offset(4f + s.cx * cw, 4f + row * ch), Size(cw, ch))
@@ -506,14 +618,14 @@ private val keysMain = listOf(
     K("F8", "\u001b[19~"), K("F9", "\u001b[20~"), K("F10", "\u001b[21~"), K("F11", "\u001b[23~"), K("F12", "\u001b[24~"),
 )
 private val keysTools = listOf(
-    K("⌨", act = "kb"), K("Paste", act = "paste"), K("Copy", act = "copy"), K("A−", act = "fm"), K("A+", act = "fp"), K("⇣", act = "bottom"),
+    K("⌨", act = "kb"), K("Live", act = "live"), K("Paste", act = "paste"), K("Copy", act = "copy"), K("A−", act = "fm"), K("A+", act = "fp"), K("Fit", act = "fit"), K("⇣", act = "bottom"),
     K("^C", "\u0003"), K("^D", "\u0004"), K("^Z", "\u001a"), K("^L", "\u000c"), K("^R", "\u0012"), K("^A", "\u0001"), K("^E", "\u0005"), K("^W", "\u0017"), K("^U", "\u0015"),
 )
 
 @Composable
 private fun TerminalKeys(
-    mods: KeyMods, emit: (String) -> Unit, toggleKeyboard: () -> Unit, paste: () -> Unit, copy: () -> Unit,
-    smaller: () -> Unit, bigger: () -> Unit, bottom: () -> Unit,
+    mods: KeyMods, emit: (String) -> Unit, live: Boolean, toggleKeyboard: () -> Unit, toggleLive: () -> Unit, fit: () -> Unit,
+    paste: () -> Unit, copy: () -> Unit, smaller: () -> Unit, bigger: () -> Unit, bottom: () -> Unit,
 ) {
     fun run(k: K) {
         when (k.act) {
@@ -522,15 +634,18 @@ private fun TerminalKeys(
             "ctrl" -> mods.ctrl = !mods.ctrl
             "alt" -> mods.alt = !mods.alt
             "kb" -> toggleKeyboard()
+            "live" -> toggleLive()
+            "fit" -> fit()
             "paste" -> paste(); "copy" -> copy(); "fm" -> smaller(); "fp" -> bigger(); "bottom" -> bottom()
         }
     }
     Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer).padding(horizontal = 6.dp, vertical = 5.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        androidx.compose.animation.AnimatedVisibility(mods.more) {
-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) { keysTools.forEach { KeyButton(it, false, ::run) } }
-        }
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
             keysMain.forEach { KeyButton(it, (it.act == "ctrl" && mods.ctrl) || (it.act == "alt" && mods.alt) || (it.act == "more" && mods.more), ::run) }
+        }
+        // the second row opens under the first, as in the Terminal tab
+        androidx.compose.animation.AnimatedVisibility(mods.more) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) { keysTools.forEach { KeyButton(it, it.act == "live" && live, ::run) } }
         }
     }
 }
@@ -540,16 +655,18 @@ private fun TerminalKeys(
 private fun KeyButton(k: K, on: Boolean, run: (K) -> Unit) {
     val scope = rememberCoroutineScope()
     val shape = RoundedCornerShape(10.dp)
+    // the press handler below is started once; it must call the current action, not the one from the first composition
+    val runNow by rememberUpdatedState(run)
     Box(
         Modifier.height(36.dp).widthIn(min = 40.dp).clip(shape)
             .background(if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer)
             .pointerInput(k) {
                 detectTapGestures(onPress = {
                     var repeating = false
-                    val job = if (k.repeat) scope.launch { delay(380); repeating = true; while (true) { run(k); delay(55) } } else null
+                    val job = if (k.repeat) scope.launch { delay(380); repeating = true; while (true) { runNow(k); delay(55) } } else null
                     val released = tryAwaitRelease()
                     job?.cancel()
-                    if (released && !repeating) run(k)
+                    if (released && !repeating) runNow(k)
                 })
             }.padding(horizontal = 10.dp),
         contentAlignment = Alignment.Center,

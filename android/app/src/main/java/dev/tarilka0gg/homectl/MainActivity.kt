@@ -26,7 +26,9 @@ class MainActivity : FragmentActivity() {
         root.viewTreeObserver.addOnGlobalLayoutListener {
             val r = android.graphics.Rect()
             root.getWindowVisibleDisplayFrame(r)
-            TerminalHub.imeVisible = r.bottom < resources.displayMetrics.heightPixels * 0.8
+            val up = r.bottom < resources.displayMetrics.heightPixels * 0.8
+            TerminalHub.imeVisible = up
+            if (Hc.imeUp != up) Hc.imeUp = up
         }
         setContent { HomectlTheme { LockGate(this) { App(); Hc.pwRequest?.let { PasswordDialog(it, this) } } } }
     }
