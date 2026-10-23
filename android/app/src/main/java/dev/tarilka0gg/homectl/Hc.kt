@@ -544,6 +544,8 @@ object Hc {
         Keyring.init(ctx)
         // tokens are kept encrypted in the keyring; a plain list from an older version is moved there on first run
         Diag.init(ctx)
+        Diag.watchCrashes()
+        Diag.noteExits(ctx)
         Diag.noteVersion(ctx)
         val sealed = Keyring.get("machines", strong = false)
         // the phone's key is gone (a reinstall removes it) or could not be read; the blob is kept, pairing again replaces it

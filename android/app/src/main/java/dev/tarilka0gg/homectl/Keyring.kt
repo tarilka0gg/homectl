@@ -121,11 +121,12 @@ object Keyring {
         return suspendCancellableCoroutine { cont ->
             val prompt = BiometricPrompt(activity, ContextCompat.getMainExecutor(activity), object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    Diag.log("unlock succeeded (type ${result.authenticationType})")
                     unlocked = true
                     lastAuthAt = System.currentTimeMillis()
                     if (cont.isActive) cont.resume(true)
                 }
-                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) { if (cont.isActive) cont.resume(false) }
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) { Diag.log("unlock error $errorCode: $errString"); if (cont.isActive) cont.resume(false) }
             })
             val info = BiometricPrompt.PromptInfo.Builder().setTitle(title).apply { subtitle?.let { setSubtitle(it) } }.setAllowedAuthenticators(allowed).build()
             prompt.authenticate(info)

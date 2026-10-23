@@ -40,11 +40,19 @@ class MainActivity : FragmentActivity() {
     override fun onStop() {
         super.onStop()
         LockState.onStop()
+        Diag.log("stopped (finishing=$isFinishing, config change=$isChangingConfigurations)")
     }
 
     override fun onStart() {
         super.onStart()
+        val was = LockState.locked
         LockState.onStart()
+        Diag.log("started (locked $was -> ${LockState.locked})")
+    }
+
+    override fun onDestroy() {
+        Diag.log("destroyed (finishing=$isFinishing, config change=$isChangingConfigurations)")
+        super.onDestroy()
     }
 
     override fun onResume() {
