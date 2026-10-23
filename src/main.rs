@@ -105,7 +105,8 @@ pub(crate) fn device_gate(app: &App, headers: &HeaderMap, peer: Option<SocketAdd
     let Some(sig) = device::sig_from_headers(headers).or(ws_sig) else { return deny("this request isn't signed by a registered phone") };
     match app.devices.verify(method, path_query, &sig) {
         Ok(()) => Ok(()),
-        Err(why) => deny(why),
+        // the id is a public fingerprint of the phone's key, shown in the app under System → Security
+        Err(why) => deny(&format!("{why} {}", sig.dev.chars().take(16).collect::<String>())),
     }
 }
 

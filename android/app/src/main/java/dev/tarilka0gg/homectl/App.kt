@@ -144,6 +144,9 @@ private fun AddMachineScreen(canCancel: Boolean, onDone: () -> Unit) {
     Scaffold { pad ->
         Column(Modifier.padding(pad).padding(20.dp).fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Text("Add a machine", style = MaterialTheme.typography.headlineMedium)
+            if (Hc.keysLost && !Hc.paired) Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                Text("Your saved logins couldn't be opened. Android deletes an app's keys when it is uninstalled (installing an older version or a differently signed build does that), so this phone has to be paired again. Open the app once on your home Wi-Fi or Tailscale so the phone registers itself.", Modifier.padding(14.dp), style = MaterialTheme.typography.bodyMedium)
+            }
             Section("Nearby", trailing = {
                 if (found == null) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp) else TextButton({ scanNonce++ }) { Text("Rescan") }
             }) {

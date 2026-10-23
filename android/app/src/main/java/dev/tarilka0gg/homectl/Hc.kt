@@ -105,7 +105,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
                 if (c2.responseCode == 401) {
                     val why = runCatching { JSONObject(c2.errorStream?.bufferedReader()?.readText().orEmpty()).optString("why") }.getOrDefault("")
                     Hc.memPutBool("enrolled.$id", false)
-                    return@withContext Probe(e, false, System.currentTimeMillis() - t0, "reachable, but this phone isn't registered with the machine" + if (why.isNotBlank()) " ($why)" else "" + " — open the app once on the home network")
+                    return@withContext Probe(e, false, System.currentTimeMillis() - t0, "reachable, but this phone isn't registered with the machine" + (if (why.isNotBlank()) " ($why)" else "") + " — open the app once on the home network (Wi-Fi or Tailscale)")
                 }
             }
             Probe(e, ok, System.currentTimeMillis() - t0, if (ok) "answered" else "answered with HTTP $code, but not homectl")
@@ -525,6 +525,9 @@ object Hc {
     fun setTab(i: Int) { lastTab = i; prefs.edit().putInt("tab", i).apply() }
 
     val paired get() = machines.isNotEmpty()
+
+    /** True when saved logins existed but could not be opened, so the user is told to pair again instead of just seeing an empty app. */
+    var keysLost by mutableStateOf(false)
     val cur: Machine? get() = machines.find { it.id == selectedId } ?: machines.firstOrNull()
 
     fun init(ctx: Context) {
@@ -537,7 +540,9 @@ object Hc {
         lastTab = prefs.getInt("tab", 0)
         Keyring.init(ctx)
         // tokens are kept encrypted in the keyring; a plain list from an older version is moved there on first run
-        val stored = (Keyring.get("machines", strong = false) as? Keyring.Got.Value)?.text ?: prefs.getString("machines", null)
+        val sealed = Keyring.get("machines", strong = false)
+        if (sealed is Keyring.Got.Lost) { keysLost = true; Keyring.remove("machines") } // the phone's key is gone (reinstall, other signature): the old blob can never open again
+        val stored = (sealed as? Keyring.Got.Value)?.text ?: prefs.getString("machines", null)
         stored?.let { s ->
             val a = JSONArray(s)
             for (i in 0 until a.length()) {
