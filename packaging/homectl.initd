@@ -30,4 +30,14 @@ start_pre() {
 	# the daemon keeps its token and settings under $HOME
 	HOME="$(getent passwd "$HOMECTL_USER" | cut -d: -f6)"
 	export HOME
+	PATH="$HOME/.local/bin:$PATH"
+	export PATH
+	# on a desktop, let it see the user's audio, clipboard and screens once they are logged in
+	uid="$(id -u "$HOMECTL_USER")"
+	if [ -d "/run/user/$uid" ]; then
+		export XDG_RUNTIME_DIR="/run/user/$uid"
+		for s in "/run/user/$uid"/wayland-*; do
+			case "$s" in *.lock) ;; *) [ -S "$s" ] && export WAYLAND_DISPLAY="${s##*/}" && break ;; esac
+		done
+	fi
 }

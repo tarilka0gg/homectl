@@ -59,7 +59,7 @@ chmod +x homectl-linux-x86_64
 ```
 
 It uses `brightnessctl`, `wpctl` / `pactl`, `nmcli`, `bluetoothctl`, `ddcutil`, `wl-clipboard`, `loginctl` and `doas` when they are there;
-a feature whose tool is missing does not appear. To start it at boot on OpenRC: `doas sh packaging/install-service.sh [USER] [PATH-TO-homectl]`.
+a feature whose tool is missing does not appear. To start it at boot on OpenRC (with the tunnel on by default): `doas sh packaging/install-service.sh [USER] [PATH-TO-homectl]`.
 
 Open the `.apk` on the phone (allow "install unknown apps" once). The app lists the machines it finds on the network; tap **Pair**
 and type the 6-digit code the machine shows. **Then open the app once on the home network:** that is when the phone registers its
