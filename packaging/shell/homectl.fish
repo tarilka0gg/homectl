@@ -2,9 +2,7 @@
 # Install: copy to ~/.config/fish/conf.d/homectl.fish. Opt out for one shell: set HOMECTL_NO_MIRROR=1. Disable all: HOMECTL_NO_TERMINAL=1 in the daemon.
 
 function homectl-attach -d "Mirror this terminal in the homectl app (restarts this shell inside the wrapper, keeping cwd and exported variables)"
-    if set -q HOMECTL_WINDOW
-        echo "already mirrored"; return 0
-    end
+    set -q HOMECTL_WINDOW; and return 0 # already mirrored: say nothing
     if not command -q homectl-pty
         echo "homectl-pty not found in PATH" >&2; return 1
     end

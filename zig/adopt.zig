@@ -158,7 +158,7 @@ fn scan(verbose: bool) void {
             if (verbose) std.debug.print("fish {s} on pts/{d}: no pty master found\n", .{ pid, pts });
             continue;
         };
-        const ok = typeInto(m, "homectl-attach\r");
+        const ok = typeInto(m, " homectl-attach\r"); // the leading space keeps it out of fish history
         if (verbose) std.debug.print("fish {s} on pts/{d}: master in process {s} fd {s}: {s}\n", .{ pid, pts, m.pid, m.fd, if (ok) "adopted" else "could not type" });
     }
 }
@@ -173,6 +173,17 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
             std.debug.print("usage: homectl-adopt [--once]\n  moves idle fish terminals into homectl-pty so they can be mirrored\n", .{});
             return;
+        }
+    }
+    // one copy is enough: a second would only try the same shells again
+    if (!once) {
+        var ps: std.ArrayList([]u8) = .empty;
+        list("/proc", &ps);
+        const me = linux.getpid();
+        for (ps.items) |p| {
+            if (!isNum(p)) continue;
+            var cb: [32]u8 = undefined;
+            if (std.mem.eql(u8, std.mem.trim(u8, readFile(pathz("/proc/{s}/comm", .{p}), &cb), "\n"), "homectl-adopt") and (std.fmt.parseInt(i32, p, 10) catch me) != me) return;
         }
     }
     tried = std.AutoHashMap(i64, void).init(A);
