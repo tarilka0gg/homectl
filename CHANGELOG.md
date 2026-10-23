@@ -3,6 +3,15 @@
 All notable changes to homectl, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/), with
 `## [version] - date` headings. The app and the daemon share one version number.
 
+## [0.18.4] - 2026-10-23
+
+### Changed
+- **The terminal view types with your own keyboard, straight into the terminal**, in whatever layout and language it is set to (suggestions off, the way terminal apps ask for it), with the Terminal tab's key rows above it. The invisible-field keyboard from 0.18.2 is gone.
+
+### Fixed
+- Scrolling back through a terminal no longer fights live updates: the screen used to pull the view to the bottom while a finger was on it. The view follows the end of the output until you scroll away, and the app asks for all 1000 lines of history the wrapper keeps (it was 400).
+- Closing a window now says whether the close was sent or refused. A card for a wrapped terminal that no window title points to (an older wrapper) can be closed too: its shell is hung up.
+
 ## [0.18.3] - 2026-10-23
 
 ### Fixed

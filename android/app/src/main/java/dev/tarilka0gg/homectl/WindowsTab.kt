@@ -355,8 +355,7 @@ private fun TerminalView(c: WinCard, onBack: () -> Unit) {
     val mods = remember { KeyMods() }
     var zoom by remember { mutableFloatStateOf(1f) }
     var jump by remember { mutableIntStateOf(0) }
-    val focus = remember { FocusRequester() }
-    val kb = LocalSoftwareKeyboardController.current
+    var input by remember { mutableStateOf<TermInput?>(null) }
     val clip = LocalClipboardManager.current
     // the bottom dock slides away while the keyboard is up and comes back when it closes
     val imeUp = WindowInsets.isImeVisible
@@ -364,6 +363,7 @@ private fun TerminalView(c: WinCard, onBack: () -> Unit) {
     DisposableEffect(Unit) { onDispose { Hc.dockHidden = false } }
 
     /** Everything typed or pressed goes through here, so Ctrl and Alt apply to the next key whichever way it came. */
+    val emitRef = remember { mutableStateOf<(String) -> Unit>({}) }
     fun emit(raw: String) {
         var t = raw
         if (mods.ctrl && t.length == 1 && (t[0] in '@'..'_' || t[0] in 'a'..'z')) t = (t[0].code and 0x1f).toChar().toString()
@@ -371,7 +371,8 @@ private fun TerminalView(c: WinCard, onBack: () -> Unit) {
         if (mods.alt) { t = "\u001b$t"; mods.alt = false }
         keys.trySend(t)
     }
-    fun showKeyboard() { focus.requestFocus(); kb?.show() }
+    emitRef.value = ::emit
+    fun showKeyboard() { input?.show() }
 
     Column(Modifier.fillMaxSize().imePadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -395,35 +396,20 @@ private fun TerminalView(c: WinCard, onBack: () -> Unit) {
                 // a tap is a click for programs that asked for the mouse, and otherwise brings up the keyboard
                 if (s.mouse > 0) emit("\u001b[<0;${col + 1};${row + 1}M\u001b[<0;${col + 1};${row + 1}m") else showKeyboard()
             }
+            androidx.compose.ui.viewinterop.AndroidView({ c -> TermInput(c) { t -> emitRef.value(t) }.also { input = it } }, Modifier.size(1.dp))
         }
         TerminalKeys(
             mods, ::emit,
-            toggleKeyboard = { if (imeUp) kb?.hide() else showKeyboard() },
+            toggleKeyboard = { if (imeUp) input?.hide() else showKeyboard() },
             paste = { clip.getText()?.text?.takeIf { it.isNotEmpty() }?.let { emit(it) } },
             copy = { screen?.let { sc -> clip.setText(AnnotatedString(sc.lines.joinToString("\n") { l -> l.joinToString("") { it.text }.trimEnd() }.trimEnd())) } },
             smaller = { zoom = (zoom * 0.9f).coerceAtLeast(0.6f) }, bigger = { zoom = (zoom * 1.1f).coerceAtMost(2.2f) }, bottom = { jump++ },
         )
-        CommandBar(focus) { keys.trySend(it) }
     }
 }
 
 /** Ctrl and Alt stay pressed until the next key. */
 private class KeyMods { var ctrl by mutableStateOf(false); var alt by mutableStateOf(false); var more by mutableStateOf(false) }
-
-/** The ordinary text box and Send button: type a line (or nothing, for just Enter) and send it with Enter. */
-@Composable
-private fun CommandBar(focus: FocusRequester, send: (String) -> Unit) {
-    var text by remember { mutableStateOf("") }
-    fun go() { send(text + "\r"); text = "" }
-    Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer).padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        OutlinedTextField(
-            text, { text = it }, Modifier.weight(1f).focusRequester(focus), singleLine = true, placeholder = { Text("Type a command") },
-            keyboardOptions = KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Send, autoCorrectEnabled = false),
-            keyboardActions = KeyboardActions(onSend = { go() }),
-        )
-        IconButton({ go() }) { Icon(Icons.Default.Send, "Send") }
-    }
-}
 
 @Composable
 private fun ScreenCanvas(s: Screen, zoom: Float, jump: Int, onCell: (Int, Int) -> Unit) {
