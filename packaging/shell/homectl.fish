@@ -3,6 +3,7 @@
 
 function homectl-attach -d "Mirror this terminal in the homectl app (restarts this shell inside the wrapper, keeping cwd and exported variables)"
     set -q HOMECTL_WINDOW; and return 0 # already mirrored: say nothing
+    string match -q "/dev/pts/*" (tty); or begin; echo "homectl-attach: only inside a terminal window, not on a console" >&2; return 1; end
     if not command -q homectl-pty
         echo "homectl-pty not found in PATH" >&2; return 1
     end
