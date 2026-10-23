@@ -43,9 +43,18 @@ pub struct Out {
     pub text: String,
 }
 
+/// doas says "Authorization required/failed" on OpenBSD and Alpine, but "Authentication required/failed" in OpenDoas (Gentoo, Arch…).
+pub fn says_required(text: &str) -> bool {
+    text.contains("Authorization required") || text.contains("Authentication required")
+}
+
+pub fn says_failed(text: &str) -> bool {
+    text.contains("Authorization failed") || text.contains("Authentication failed")
+}
+
 impl Out {
     pub fn wrong_password(&self) -> bool {
-        self.code != 0 && self.text.contains("Authorization failed")
+        self.code != 0 && says_failed(&self.text)
     }
 }
 
@@ -157,7 +166,7 @@ pub async fn allow_rapl(password: Option<String>) -> Value {
             let o = tokio::process::Command::new("doas").args(["-n", "sh", "-c", &script]).output().await;
             match o {
                 Ok(o) if o.status.success() => json!({"ok": true}),
-                Ok(o) => json!({"ok": false, "needs_password": String::from_utf8_lossy(&o.stderr).contains("Authorization required"), "error": String::from_utf8_lossy(&o.stderr).trim()}),
+                Ok(o) => json!({"ok": false, "needs_password": says_required(&String::from_utf8_lossy(&o.stderr)), "error": String::from_utf8_lossy(&o.stderr).trim()}),
                 Err(e) => json!({"ok": false, "error": e.to_string()}),
             }
         }
@@ -195,5 +204,8 @@ mod tests {
         let o = Out { code: 1, text: "doas: Authorization failed".into() };
         assert!(o.wrong_password());
         assert!(!Out { code: 0, text: "Authorization failed".into() }.wrong_password());
+        // OpenDoas words it differently
+        assert!(Out { code: 1, text: "doas: Authentication failed".into() }.wrong_password());
+        assert!(says_required("doas: Authentication required") && says_required("doas: Authorization required") && !says_required("doas: not permitted"));
     }
 }

@@ -604,8 +604,25 @@ async fn cam_post(Path(n): Path<u8>, Json(c): Json<CamSet>) -> StatusCode {
     status(ctl::webcam_set(n, c.id, c.value))
 }
 
-async fn power_post(Path(action): Path<String>, headers: HeaderMap) -> StatusCode {
-    status(ctl::power(&action, privileged::password_from(&headers)))
+async fn power_post(Path(action): Path<String>, headers: HeaderMap) -> Response {
+    if !matches!(action.as_str(), "poweroff" | "reboot" | "suspend" | "lock") {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    // Decide before doing anything, and say so: a power action that cannot be done without a password used to answer "done" and
+    // then silently not happen. The app answers `password_required` by asking for the doas password.
+    match privileged::password_from(&headers) {
+        None if !ctl::power_without_password(&action).await => {
+            return (StatusCode::FORBIDDEN, Json(json!({"error": "password_required"}))).into_response();
+        }
+        Some(pw) => {
+            // `doas true` with that password: changes nothing
+            if privileged::test(Some(pw)).await["wrong_password"] == true {
+                return (StatusCode::FORBIDDEN, Json(json!({"error": "wrong_password"}))).into_response();
+            }
+        }
+        None => {}
+    }
+    status(ctl::power(&action, privileged::password_from(&headers))).into_response()
 }
 
 /// Checks that the machine accepts the doas password the app holds (or that none is needed).

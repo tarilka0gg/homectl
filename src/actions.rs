@@ -174,7 +174,7 @@ pub async fn run(id: &str, on: bool, password: Option<String>) -> Result<Value, 
                 if text.len() > 2000 {
                     text = format!("…{}", &text[text.len() - 2000..]);
                 }
-                if o.code != 0 && text.contains("Authorization failed") {
+                if o.code != 0 && crate::privileged::says_failed(&text) {
                     text = "wrong password. Authorization failed".into();
                 }
                 Ok((o.code, text))
@@ -209,7 +209,7 @@ pub async fn run(id: &str, on: bool, password: Option<String>) -> Result<Value, 
             None => "The command needs root: allow it in /etc/doas.conf with a `permit nopass` rule.".into(),
         }
     });
-    let needs_password = code != 0 && output.contains("Authorization required");
+    let needs_password = code != 0 && crate::privileged::says_required(&output);
     let wrong_password = code != 0 && output.contains("wrong password");
     Ok(json!({"ok": code == 0, "code": code, "output": output, "hint": hint, "needs_password": needs_password, "wrong_password": wrong_password}))
 }

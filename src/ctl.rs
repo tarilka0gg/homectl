@@ -121,7 +121,7 @@ pub async fn service_action(name: &str, action: &str, password: Option<String>) 
     match password {
         None => match Command::new("doas").args(["-n", "rc-service", name, action]).output().await {
             Ok(o) if o.status.success() => Priv::Done,
-            Ok(o) if String::from_utf8_lossy(&o.stderr).contains("Authorization required") => Priv::NeedsPassword,
+            Ok(o) if crate::privileged::says_required(&String::from_utf8_lossy(&o.stderr)) => Priv::NeedsPassword,
             _ => Priv::Failed,
         },
         Some(pw) => {
@@ -324,6 +324,25 @@ pub async fn mixer_set(kind: &str, id: &str, percent: Option<u16>, muted: Option
 }
 
 // ---- power ----
+/// Whether a power action can be done without a password: the daemon runs as root, logind lets it (polkit is only asked, nothing is
+/// changed), or a doas rule says `nopass` for it. When none of these holds the app is told to ask for the doas password.
+pub async fn power_without_password(action: &str) -> bool {
+    let (polkit, plain) = match action {
+        "poweroff" => ("org.freedesktop.login1.power-off", "poweroff"),
+        "reboot" => ("org.freedesktop.login1.reboot", "reboot"),
+        "suspend" => ("org.freedesktop.login1.suspend", "pm-suspend"),
+        _ => return true, // locking the screen needs nothing special
+    };
+    if unsafe { libc::geteuid() } == 0 {
+        return true;
+    }
+    let pid = std::process::id().to_string();
+    if ok("pkcheck", &["--action-id", polkit, "--process", &pid]).await {
+        return true;
+    }
+    run("doas", &["-C", "/etc/doas.conf", plain]).await.is_some_and(|s| s.contains("nopass"))
+}
+
 /// Runs after a short delay so the HTTP reply gets out first. HOMECTL_DRYRUN=1 only logs.
 pub fn power(action: &str, password: Option<String>) -> bool {
     let (login, plain): (&[&str], &str) = match action {
@@ -345,6 +364,7 @@ pub fn power(action: &str, password: Option<String>) -> bool {
         if ok("loginctl", &l).await || plain.is_empty() {
             return;
         }
+        eprintln!("power {action}: logind refused, trying doas");
         // Hosts without logind (e.g. Alpine): doas (with the user's password if the app sent it), then direct.
         if let Some(pw) = password {
             let p = plain.clone();
@@ -352,9 +372,10 @@ pub fn power(action: &str, password: Option<String>) -> bool {
             if matches!(done, Ok(Ok(ref o)) if o.code == 0) {
                 return;
             }
+            eprintln!("power {action}: doas with the password did not work");
         }
-        if !ok("doas", &["-n", &plain]).await {
-            ok(&plain, &[]).await;
+        if !ok("doas", &["-n", &plain]).await && !ok(&plain, &[]).await {
+            eprintln!("power {action}: no way to do it without a password (see System → doas)");
         }
     });
     true

@@ -3,6 +3,12 @@
 All notable changes to homectl, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/), with
 `## [version] - date` headings. The app and the daemon share one version number.
 
+## [0.18.7] - 2026-10-24
+
+### Fixed
+- **Power off, restart and suspend no longer fail silently.** The daemon used to answer "done" and then do nothing when the machine would only allow it with a password (a service started by OpenRC is not inside a login session, so logind refuses, and a later catch-all `doas` rule can override an earlier `nopass` one). It now checks first, without running anything, and answers `password_required`, so the app asks for the doas password; a wrong one is reported as `wrong_password`.
+- **doas password prompts work with OpenDoas.** The daemon only recognised the OpenBSD wording ("Authorization required/failed"); OpenDoas (Gentoo, Arch…) says "Authentication required/failed", so a needed or wrong password was never noticed for power actions, services and other root actions. Both wordings are understood now.
+
 ## [0.18.6] - 2026-10-24
 
 ### Changed
