@@ -11,8 +11,8 @@ android {
         applicationId = "dev.tarilka0gg.homectl"
         minSdk = 26
         targetSdk = 34
-        versionCode = 28
-        versionName = "0.18.2"
+        versionCode = 29
+        versionName = "0.18.3"
     }
     buildFeatures { compose = true }
     compileOptions {

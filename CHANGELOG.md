@@ -3,6 +3,14 @@
 All notable changes to homectl, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/), with
 `## [version] - date` headings. The app and the daemon share one version number.
 
+## [0.18.3] - 2026-10-23
+
+### Fixed
+- The app never replaces its device key or its keyring key when one exists but cannot be read at that moment (the keystore can be busy right after an update); it waits and retries. A new key would make the phone a stranger to every machine and lose the saved logins. Saved logins that cannot be opened are kept instead of deleted.
+
+### Added
+- **System → Copy diagnostics**: a short trail kept on the phone (last 60 events, no secrets) with crashes, why the previous run ended (crash, killed, force-stopped, …), unlock results and errors, app updates and lock state changes, so a problem after an update can be read off instead of guessed.
+
 ## [0.18.2] - 2026-10-23
 
 ### Added
