@@ -47,10 +47,20 @@ object Keyring {
     fun deviceSecure(): Boolean = (appCtx.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager).isDeviceSecure
 
     /** Passwords are "strong": the key needs a fingerprint/face/PIN unlock within the last five minutes. Everything else is only bound to this phone's hardware. */
-    private fun key(strong: Boolean): SecretKey {
+    private fun key(strong: Boolean, create: Boolean = true): SecretKey {
         val alias = if (strong) ALIAS_STRONG else ALIAS_BOUND
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (ks.getKey(alias, null) as? SecretKey)?.let { return it }
+        // an existing key that cannot be read right now is waited for and never replaced: a new key could not open what the old one sealed
+        for (attempt in 0..4) {
+            val k = runCatching { ks.getKey(alias, null) as? SecretKey }.getOrNull()
+            if (k != null) return k
+            if (!runCatching { ks.containsAlias(alias) }.getOrDefault(true)) break
+            Diag.log("keyring key $alias present but unreadable (try ${attempt + 1})")
+            Thread.sleep(200)
+        }
+        if (runCatching { ks.containsAlias(alias) }.getOrDefault(true)) throw java.io.IOException("keyring key $alias exists but cannot be read")
+        if (!create) throw java.security.GeneralSecurityException("no keyring key $alias")
+        Diag.log("keyring key $alias created (none existed)")
         val b = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
@@ -71,7 +81,7 @@ object Keyring {
 
     private fun decrypt(blob: String, strong: Boolean): ByteArray {
         val raw = Base64.decode(blob, Base64.NO_WRAP)
-        val c = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key(strong), GCMParameterSpec(128, raw, 0, 12)) }
+        val c = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key(strong, create = false), GCMParameterSpec(128, raw, 0, 12)) }
         return c.doFinal(raw, 12, raw.size - 12)
     }
 

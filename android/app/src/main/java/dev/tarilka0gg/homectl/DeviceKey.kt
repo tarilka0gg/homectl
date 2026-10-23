@@ -26,7 +26,17 @@ object DeviceKey {
     @Synchronized
     private fun pair(): KeyPair {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (ks.getEntry(ALIAS, null) as? KeyStore.PrivateKeyEntry)?.let { return KeyPair(it.certificate.publicKey, it.privateKey) }
+        // A key that exists but cannot be read right now (the keystore can be busy just after an update or a boot) must never be
+        // replaced: a new key would be a new phone as far as the machines are concerned. Wait, and give up without replacing it.
+        for (attempt in 0..4) {
+            val e = runCatching { ks.getEntry(ALIAS, null) as? KeyStore.PrivateKeyEntry }.getOrNull()
+            if (e != null) return KeyPair(e.certificate.publicKey, e.privateKey)
+            if (!runCatching { ks.containsAlias(ALIAS) }.getOrDefault(true)) break
+            Diag.log("device key present but unreadable (try ${attempt + 1})")
+            Thread.sleep(200)
+        }
+        if (runCatching { ks.containsAlias(ALIAS) }.getOrDefault(true)) throw java.io.IOException("the device key exists but cannot be read")
+        Diag.log("device key created (none existed)")
         fun gen(strongBox: Boolean): KeyPair {
             val b = KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_SIGN)
                 .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
@@ -47,6 +57,8 @@ object DeviceKey {
     fun fingerprintPretty(): String = fingerprint().uppercase().chunked(4).joinToString(" ")
 
     /** The id the machines know this phone by (first 16 hex digits of the fingerprint). */
+    fun idOrNull(): String? = runCatching { id() }.getOrNull()
+
     fun id(): String = fingerprint().take(16)
 
     private fun b64url(b: ByteArray) = Base64.encodeToString(b, Base64.NO_WRAP or Base64.NO_PADDING or Base64.URL_SAFE)

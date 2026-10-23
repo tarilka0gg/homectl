@@ -176,7 +176,8 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         val e = active ?: return
         val direct = e.kind == "lan" || e.kind == "tailscale"
         if (direct && !Hc.memBool("enrolled.$id")) {
-            val body = JSONObject().put("name", android.os.Build.MODEL).put("key", DeviceKey.publicKeyB64())
+            val key = runCatching { DeviceKey.publicKeyB64() }.getOrNull() ?: return
+            val body = JSONObject().put("name", android.os.Build.MODEL).put("key", key)
             val (code, _) = postSlowWith("/api/devices", body, 15_000, null)
             if (code == 200) Hc.memPutBool("enrolled.$id", true)
         }
@@ -542,8 +543,12 @@ object Hc {
         lastTab = prefs.getInt("tab", 0)
         Keyring.init(ctx)
         // tokens are kept encrypted in the keyring; a plain list from an older version is moved there on first run
+        Diag.init(ctx)
+        Diag.noteVersion(ctx)
         val sealed = Keyring.get("machines", strong = false)
-        if (sealed is Keyring.Got.Lost) { keysLost = true; Keyring.remove("machines") } // the phone's key is gone (reinstall, other signature): the old blob can never open again
+        // the phone's key is gone (a reinstall removes it) or could not be read; the blob is kept, pairing again replaces it
+        if (sealed is Keyring.Got.Lost) { keysLost = true; Diag.log("saved logins could not be opened (key lost or unreadable)") }
+        else Diag.log("start: saved logins ${if (sealed is Keyring.Got.Value) "opened" else "none"}, device key ${DeviceKey.idOrNull() ?: "unreadable"}")
         val stored = (sealed as? Keyring.Got.Value)?.text ?: prefs.getString("machines", null)
         stored?.let { s ->
             val a = JSONArray(s)

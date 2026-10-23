@@ -34,6 +34,8 @@ fun SystemScreen(onAddMachine: () -> Unit) {
     Section("Settings") {
         val appVersion = remember { runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrDefault("?") }
         Text("homectl app $appVersion" + (m?.daemonVersion?.takeIf { it.isNotBlank() }?.let { " · daemon on ${m.name} $it" } ?: ""), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+        TextButton({ clipboard.setText(androidx.compose.ui.text.AnnotatedString(Diag.text())); android.widget.Toast.makeText(ctx, "Diagnostics copied", android.widget.Toast.LENGTH_SHORT).show() }) { Text("Copy diagnostics") }
         Text("Update speed", style = MaterialTheme.typography.titleSmall)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf(500 to "Fast 0.5 s", 1000 to "Normal 1 s", 2000 to "Relaxed 2 s", 5000 to "Slow 5 s").forEach { (ms, label) ->
@@ -313,9 +315,9 @@ private fun SecuritySection(m: Machine) {
         }
         // ---- this phone's identity ----
         val devices = loaded(nonce to m.id, 0, "dev-${m.id}") { Hc.array("/api/devices") }
-        val registered = devices.value?.objs().orEmpty().any { it.str("id") == DeviceKey.id() }
+        val registered = devices.value?.objs().orEmpty().any { it.str("id") == DeviceKey.idOrNull() }
         Text("This phone", style = MaterialTheme.typography.titleSmall)
-        Text("Fingerprint (SHA-256): ${DeviceKey.fingerprintPretty().chunked(20).joinToString("\n")}", style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+        Text("Fingerprint (SHA-256): ${(runCatching { DeviceKey.fingerprintPretty() }.getOrDefault("unavailable right now")).chunked(20).joinToString("\n")}", style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
         Text(
             when {
                 devices.value == null -> "Checking whether ${m.name} knows this phone…"
@@ -332,7 +334,7 @@ private fun SecuritySection(m: Machine) {
                 nonce++
             }
         }
-        val others = devices.value?.objs().orEmpty().filter { it.str("id") != DeviceKey.id() }
+        val others = devices.value?.objs().orEmpty().filter { it.str("id") != DeviceKey.idOrNull() }
         if (others.isNotEmpty()) {
             Text("Other registered phones", style = MaterialTheme.typography.labelMedium)
             others.forEach { d ->
