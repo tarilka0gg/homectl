@@ -9,6 +9,8 @@ function homectl-attach -d "Mirror this terminal in the homectl app (restarts th
     exec homectl-pty -- (status fish-path)
 end
 
-if status is-interactive; and not set -q HOMECTL_WINDOW; and not set -q HOMECTL_NO_MIRROR; and command -q homectl-pty
+# never a login shell (the wrapper starts a plain fish, so a login script such as "start the compositor on tty1" would never run),
+# and only inside a terminal window, not on a Linux console
+if status is-interactive; and not status is-login; and string match -q "/dev/pts/*" (tty); and not set -q HOMECTL_WINDOW; and not set -q HOMECTL_NO_MIRROR; and command -q homectl-pty
     homectl-attach
 end
