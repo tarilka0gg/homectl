@@ -3,6 +3,20 @@
 All notable changes to homectl, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/), with
 `## [version] - date` headings. The app and the daemon share one version number.
 
+## [0.18.5] - 2026-10-24
+
+### Changed
+- **The terminal view has the ordinary text box again**: type a whole line, with the cursor where you tap and your own keyboard, and it goes out with Enter. Typing letter by letter is a button (Live) in the second key row, for programs that need it.
+- The second row of keys opens under the first, as in the Terminal tab.
+- The text is a fixed, readable 13 sp (what the Terminal tab uses). Wide windows scroll sideways; **Fit** shrinks the font to the screen width when you want that.
+
+### Added
+- **Select and copy text**: press and hold on the output, drag, then Copy.
+- **History up to 5000 lines** (the wrapper kept 1000): the app loads more as you scroll up.
+
+### Fixed
+- The keyboard button opens and closes the keyboard reliably (it used to act on a stale state and only ever opened it), and the bottom dock comes back when the keyboard closes however it was closed.
+
 ## [0.18.4] - 2026-10-23
 
 ### Changed
