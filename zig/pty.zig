@@ -63,6 +63,9 @@ const Term = struct {
     wrap_pending: bool = false,
     autowrap: bool = true,
     cursor_visible: bool = true,
+    /// 0 = the program does not want the mouse, otherwise the highest of DECSET 1000/1002/1003 it asked for; sgr = DECSET 1006.
+    mouse: u16 = 0,
+    mouse_sgr: bool = false,
     pen: Cell = .{},
     saved: struct { cx: usize = 0, cy: usize = 0, pen: Cell = .{} } = .{},
     top: usize = 0,
@@ -362,6 +365,8 @@ const Term = struct {
                     for (0..t.np) |i| switch (t.param(i, 0)) {
                         7 => t.autowrap = on,
                         25 => t.cursor_visible = on,
+                        1000, 1002, 1003 => |m| t.mouse = if (on) @intCast(m) else if (t.mouse == m) 0 else t.mouse,
+                        1006 => t.mouse_sgr = on,
                         47, 1047, 1049 => t.setAlt(on),
                         else => {},
                     };
@@ -638,6 +643,8 @@ fn snapshot(t: *Term, back_want: usize, pid: i32, cmd: []const u8) Buf {
     b.s(if (t.cursor_visible) "true" else "false");
     b.s(",\"alt\":");
     b.s(if (t.use_alt) "true" else "false");
+    b.s(",\"mouse\":");
+    b.num(if (t.mouse_sgr) t.mouse else 0); // only SGR mouse reports are produced by the app, so older encodings count as "no mouse"
     b.s(",\"wid\":");
     b.str(&t.wid);
     b.s(",\"title\":");
@@ -1285,4 +1292,14 @@ test "title tagger never eats bytes it does not understand" {
         tg.feed(&input, &out);
         try std.testing.expect(out.items.len + 1100 >= input.len);
     }
+}
+
+test "mouse mode is tracked for programs that ask for it" {
+    var t = testTerm(20, 4);
+    try std.testing.expectEqual(@as(u16, 0), t.mouse);
+    t.feed("\x1b[?1002h\x1b[?1006h");
+    try std.testing.expectEqual(@as(u16, 1002), t.mouse);
+    try std.testing.expect(t.mouse_sgr);
+    t.feed("\x1b[?1002l");
+    try std.testing.expectEqual(@as(u16, 0), t.mouse);
 }

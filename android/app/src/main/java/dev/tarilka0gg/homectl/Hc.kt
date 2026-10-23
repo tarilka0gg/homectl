@@ -510,6 +510,8 @@ object Hc {
     var openPath by mutableStateOf<String?>(null)
 
     /** Last open tab, so coming back to the app lands where you left. */
+    /** True while the terminal view's keyboard is up: the bottom dock slides away and comes back when it closes. */
+    var dockHidden by mutableStateOf(false)
     var lastTab by mutableIntStateOf(0)
 
     fun setSpeed(ms: Int) { speedMs = ms; prefs.edit().putInt("speed", ms).apply() }

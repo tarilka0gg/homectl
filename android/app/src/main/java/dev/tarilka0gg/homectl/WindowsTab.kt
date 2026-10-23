@@ -21,6 +21,25 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -252,7 +271,7 @@ private fun cpWidth(cp: Int): Int = when {
 
 private class Screen(
     val seq: Long, val cols: Int, val rows: Int, val cx: Int, val cy: Int, val cursor: Boolean, val alt: Boolean,
-    val title: String, val sb: Int, val lines: List<List<Run>>,
+    val title: String, val sb: Int, val lines: List<List<Run>>, val mouse: Int = 0,
 )
 
 private fun parseScreen(j: JSONObject): Screen {
@@ -261,7 +280,7 @@ private fun parseScreen(j: JSONObject): Screen {
         val rs: JSONArray = ls.getJSONArray(i)
         (0 until rs.length()).map { k -> rs.getJSONArray(k).let { Run(it.getString(0), it.getInt(1), it.getInt(2), it.getInt(3)) } }
     }
-    return Screen(j.getLong("seq"), j.getInt("cols"), j.getInt("rows"), j.getInt("cx"), j.getInt("cy"), j.optBoolean("cv", true), j.optBoolean("alt"), j.str("title"), j.optInt("sb"), lines)
+    return Screen(j.getLong("seq"), j.getInt("cols"), j.getInt("rows"), j.getInt("cx"), j.getInt("cy"), j.optBoolean("cv", true), j.optBoolean("alt"), j.str("title"), j.optInt("sb"), lines, j.optInt("mouse"))
 }
 
 /** A line of runs as styled text, for the small previews on the cards. */
@@ -326,6 +345,27 @@ private fun TerminalView(c: WinCard, onBack: () -> Unit) {
     // keys go out one at a time, in order
     LaunchedEffect(c.term) { for (k in keys) Hc.post("/api/windows/${c.term}/input", body("text" to k)) }
 
+    val mods = remember { KeyMods() }
+    var zoom by remember { mutableFloatStateOf(1f) }
+    var jump by remember { mutableIntStateOf(0) }
+    val focus = remember { FocusRequester() }
+    val kb = LocalSoftwareKeyboardController.current
+    val clip = LocalClipboardManager.current
+    // the bottom dock slides away while the keyboard is up and comes back when it closes
+    val imeUp = WindowInsets.isImeVisible
+    LaunchedEffect(imeUp) { Hc.dockHidden = imeUp }
+    DisposableEffect(Unit) { onDispose { Hc.dockHidden = false } }
+
+    /** Everything typed or pressed goes through here, so Ctrl and Alt apply to the next key whichever way it came. */
+    fun emit(raw: String) {
+        var t = raw
+        if (mods.ctrl && t.length == 1 && (t[0] in '@'..'_' || t[0] in 'a'..'z')) t = (t[0].code and 0x1f).toChar().toString()
+        if (mods.ctrl) mods.ctrl = false
+        if (mods.alt) { t = "\u001b$t"; mods.alt = false }
+        keys.trySend(t)
+    }
+    fun showKeyboard() { focus.requestFocus(); kb?.show() }
+
     Column(Modifier.fillMaxSize().imePadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onBack) { Icon(Icons.Default.ArrowBack, "Back to the windows") }
@@ -344,14 +384,55 @@ private fun TerminalView(c: WinCard, onBack: () -> Unit) {
         Box(Modifier.weight(1f).fillMaxWidth().background(Color(DEFAULT_BG))) {
             val s = screen
             if (s == null) CircularProgressIndicator(Modifier.align(Alignment.Center))
-            else ScreenCanvas(s)
+            else ScreenCanvas(s, zoom, jump) { col, row ->
+                // a tap is a click for programs that asked for the mouse, and otherwise brings up the keyboard
+                if (s.mouse > 0) emit("\u001b[<0;${col + 1};${row + 1}M\u001b[<0;${col + 1};${row + 1}m") else showKeyboard()
+            }
+            TypeCatcher(focus, ::emit)
         }
-        InputBar { keys.trySend(it) }
+        TerminalKeys(
+            mods, ::emit,
+            toggleKeyboard = { if (imeUp) kb?.hide() else showKeyboard() },
+            paste = { clip.getText()?.text?.takeIf { it.isNotEmpty() }?.let { emit(it) } },
+            copy = { screen?.let { sc -> clip.setText(AnnotatedString(sc.lines.joinToString("\n") { l -> l.joinToString("") { it.text }.trimEnd() }.trimEnd())) } },
+            smaller = { zoom = (zoom * 0.9f).coerceAtLeast(0.6f) }, bigger = { zoom = (zoom * 1.1f).coerceAtMost(2.2f) }, bottom = { jump++ },
+        )
     }
 }
 
+/** Ctrl and Alt stay pressed until the next key. */
+private class KeyMods { var ctrl by mutableStateOf(false); var alt by mutableStateOf(false); var more by mutableStateOf(false) }
+
+/** An invisible text field that takes what the phone's keyboard types and sends it on, one piece at a time. */
 @Composable
-private fun ScreenCanvas(s: Screen) {
+private fun TypeCatcher(focus: FocusRequester, emit: (String) -> Unit) {
+    // a one-character anchor, so that Backspace has something to delete and shows up as a change
+    val anchor = "\u200b"
+    var tf by remember { mutableStateOf(TextFieldValue(anchor, TextRange(1))) }
+    BasicTextField(
+        tf,
+        { n ->
+            val t = n.text
+            if (t.length < anchor.length) emit("\u007f") else if (t != anchor) emit(t.removePrefix(anchor).replace("\n", "\r"))
+            tf = TextFieldValue(anchor, TextRange(1))
+        },
+        Modifier.size(1.dp).alpha(0f).focusRequester(focus).onPreviewKeyEvent { e ->
+            if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+            val seq = when (e.key) {
+                Key.Enter, Key.NumPadEnter -> "\r"; Key.Tab -> "\t"; Key.Escape -> "\u001b"; Key.Backspace -> "\u007f"
+                Key.DirectionUp -> "\u001b[A"; Key.DirectionDown -> "\u001b[B"; Key.DirectionRight -> "\u001b[C"; Key.DirectionLeft -> "\u001b[D"
+                Key.MoveHome -> "\u001b[H"; Key.MoveEnd -> "\u001b[F"; Key.PageUp -> "\u001b[5~"; Key.PageDown -> "\u001b[6~"; Key.Delete -> "\u001b[3~"
+                else -> null
+            }
+            if (seq != null) { emit(seq); true } else false
+        },
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false, imeAction = androidx.compose.ui.text.input.ImeAction.Send),
+        keyboardActions = KeyboardActions(onSend = { emit("\r") }),
+    )
+}
+
+@Composable
+private fun ScreenCanvas(s: Screen, zoom: Float, jump: Int, onCell: (Int, Int) -> Unit) {
     val density = LocalDensity.current
     val blink by rememberInfiniteTransition(label = "cursor").animateFloat(0.25f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "blink")
     val vScroll = rememberScrollState()
@@ -365,16 +446,23 @@ private fun ScreenCanvas(s: Screen) {
         val ratio = probe.measureText("M") / 100f
         val availW = with(density) { vw.toPx() } - 8f
         val fit = availW / (s.cols * ratio)
-        val px = maxOf(fit, minPx).coerceAtMost(with(density) { 16.sp.toPx() })
+        val px = maxOf(fit, minPx).coerceAtMost(with(density) { 16.sp.toPx() }) * zoom
         val cw = px * ratio
         val ch = px * 1.25f
         val totalW = cw * s.cols + 8f
         val totalH = ch * s.lines.size + 8f
-        // follow the bottom unless the person scrolled up
-        LaunchedEffect(s.seq, totalH) {
-            if (vScroll.maxValue - vScroll.value < ch * 3 || vScroll.value == 0) vScroll.scrollTo(vScroll.maxValue)
-        }
-        Box(Modifier.fillMaxSize().verticalScroll(vScroll).horizontalScroll(hScroll)) {
+        // follow the bottom unless the person scrolled up; scrolling back down to the end follows again
+        var follow by remember { mutableStateOf(true) }
+        LaunchedEffect(vScroll.isScrollInProgress) { if (!vScroll.isScrollInProgress) follow = vScroll.maxValue - vScroll.value < ch * 2 }
+        LaunchedEffect(jump) { if (jump > 0) { follow = true; vScroll.scrollTo(vScroll.maxValue) } }
+        LaunchedEffect(s.seq, totalH) { if (follow) vScroll.scrollTo(vScroll.maxValue) }
+        Box(Modifier.fillMaxSize().verticalScroll(vScroll).horizontalScroll(hScroll).pointerInput(cw, ch, s.sb, s.cols, s.rows) {
+            detectTapGestures { o ->
+                val col = ((o.x - 4f) / cw).toInt().coerceIn(0, s.cols - 1)
+                val row = ((o.y - 4f) / ch).toInt() - s.sb
+                onCell(col, row.coerceIn(0, s.rows - 1))
+            }
+        }) {
             val h = with(density) { totalH.toDp() }
             val w = with(density) { totalW.toDp() }
             androidx.compose.foundation.Canvas(Modifier.size(w.coerceAtLeast(vw), h.coerceAtLeast(vh))) {
@@ -424,26 +512,67 @@ private fun ScreenCanvas(s: Screen) {
     }
 }
 
-private val keyRow = listOf(
-    "Esc" to "\u001b", "Tab" to "\t", "^C" to "\u0003", "^D" to "\u0004", "^L" to "\u000c", "↑" to "\u001b[A", "↓" to "\u001b[B", "←" to "\u001b[D", "→" to "\u001b[C",
-    "Home" to "\u001b[H", "End" to "\u001b[F", "PgUp" to "\u001b[5~", "PgDn" to "\u001b[6~",
+/** One key of the bar: `seq` is sent as is, `act` names a local action; `repeat` keys auto-repeat while held. */
+private class K(val label: String, val seq: String? = null, val act: String? = null, val repeat: Boolean = false)
+
+// the same keys as the Terminal tab (assets/term.html)
+private val keysMain = listOf(
+    K("⋯", act = "more"), K("Esc", "\u001b"), K("Tab", "\t"), K("Ctrl", act = "ctrl"), K("Alt", act = "alt"),
+    K("↑", "\u001b[A", repeat = true), K("↓", "\u001b[B", repeat = true), K("←", "\u001b[D", repeat = true), K("→", "\u001b[C", repeat = true),
+    K("Home", "\u001b[H"), K("End", "\u001b[F"), K("PgUp", "\u001b[5~", repeat = true), K("PgDn", "\u001b[6~", repeat = true), K("Del", "\u001b[3~", repeat = true),
+    K("|", "|"), K("~", "~"), K("/", "/"), K("-", "-"), K("_", "_"), K("\\", "\\"), K("$", "$"), K("&", "&"), K("*", "*"),
+    K("F1", "\u001bOP"), K("F2", "\u001bOQ"), K("F3", "\u001bOR"), K("F4", "\u001bOS"), K("F5", "\u001b[15~"), K("F6", "\u001b[17~"), K("F7", "\u001b[18~"),
+    K("F8", "\u001b[19~"), K("F9", "\u001b[20~"), K("F10", "\u001b[21~"), K("F11", "\u001b[23~"), K("F12", "\u001b[24~"),
+)
+private val keysTools = listOf(
+    K("⌨", act = "kb"), K("Paste", act = "paste"), K("Copy", act = "copy"), K("A−", act = "fm"), K("A+", act = "fp"), K("⇣", act = "bottom"),
+    K("^C", "\u0003"), K("^D", "\u0004"), K("^Z", "\u001a"), K("^L", "\u000c"), K("^R", "\u0012"), K("^A", "\u0001"), K("^E", "\u0005"), K("^W", "\u0017"), K("^U", "\u0015"),
 )
 
 @Composable
-private fun InputBar(send: (String) -> Unit) {
-    var text by remember { mutableStateOf("") }
-    Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer).padding(horizontal = 8.dp, vertical = 6.dp)) {
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            keyRow.forEach { (label, seq) -> FilledTonalButton({ send(seq) }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp), modifier = Modifier.height(34.dp)) { Text(label, style = MaterialTheme.typography.labelMedium) } }
+private fun TerminalKeys(
+    mods: KeyMods, emit: (String) -> Unit, toggleKeyboard: () -> Unit, paste: () -> Unit, copy: () -> Unit,
+    smaller: () -> Unit, bigger: () -> Unit, bottom: () -> Unit,
+) {
+    fun run(k: K) {
+        when (k.act) {
+            null -> emit(k.seq ?: return)
+            "more" -> mods.more = !mods.more
+            "ctrl" -> mods.ctrl = !mods.ctrl
+            "alt" -> mods.alt = !mods.alt
+            "kb" -> toggleKeyboard()
+            "paste" -> paste(); "copy" -> copy(); "fm" -> smaller(); "fp" -> bigger(); "bottom" -> bottom()
         }
-        Spacer(Modifier.height(6.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                text, { text = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Type a command") },
-                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Send, autoCorrectEnabled = false),
-                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSend = { send(text + "\r"); text = "" }),
-            )
-            IconButton({ send(text + "\r"); text = "" }) { Icon(Icons.Default.Send, "Send") }
+    }
+    Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer).padding(horizontal = 6.dp, vertical = 5.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        androidx.compose.animation.AnimatedVisibility(mods.more) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) { keysTools.forEach { KeyButton(it, false, ::run) } }
         }
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            keysMain.forEach { KeyButton(it, (it.act == "ctrl" && mods.ctrl) || (it.act == "alt" && mods.alt) || (it.act == "more" && mods.more), ::run) }
+        }
+    }
+}
+
+/** Fires on release, so swiping along the row doesn't press keys; holding a navigation key repeats it. */
+@Composable
+private fun KeyButton(k: K, on: Boolean, run: (K) -> Unit) {
+    val scope = rememberCoroutineScope()
+    val shape = RoundedCornerShape(10.dp)
+    Box(
+        Modifier.height(36.dp).widthIn(min = 40.dp).clip(shape)
+            .background(if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer)
+            .pointerInput(k) {
+                detectTapGestures(onPress = {
+                    var repeating = false
+                    val job = if (k.repeat) scope.launch { delay(380); repeating = true; while (true) { run(k); delay(55) } } else null
+                    val released = tryAwaitRelease()
+                    job?.cancel()
+                    if (released && !repeating) run(k)
+                })
+            }.padding(horizontal = 10.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(k.label, style = MaterialTheme.typography.labelLarge, color = if (on) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer, maxLines = 1)
     }
 }

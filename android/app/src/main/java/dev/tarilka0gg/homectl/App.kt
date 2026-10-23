@@ -92,9 +92,15 @@ fun App() {
             )
         },
         bottomBar = {
-            NavigationBar {
-                Tab.entries.forEach {
-                    NavigationBarItem(selected = tab == it, onClick = { tab = it; Hc.memPutStr("tab.name", it.name) }, icon = { Icon(it.icon, it.label) }, label = { Text(it.label, maxLines = 1) })
+            androidx.compose.animation.AnimatedVisibility(
+                !Hc.dockHidden,
+                enter = androidx.compose.animation.slideInVertically(androidx.compose.animation.core.tween(240)) { it } + androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(240)),
+                exit = androidx.compose.animation.slideOutVertically(androidx.compose.animation.core.tween(240)) { it } + androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(240)),
+            ) {
+                NavigationBar {
+                    Tab.entries.forEach {
+                        NavigationBarItem(selected = tab == it, onClick = { tab = it; Hc.memPutStr("tab.name", it.name) }, icon = { Icon(it.icon, it.label) }, label = { Text(it.label, maxLines = 1) })
+                    }
                 }
             }
         },
