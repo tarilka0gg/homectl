@@ -1,0 +1,16 @@
+# homectl shell part: puts every interactive fish under homectl-pty so its window can be mirrored in the app.
+# Install: copy to ~/.config/fish/conf.d/homectl.fish. Opt out for one shell: set HOMECTL_NO_MIRROR=1. Disable all: HOMECTL_NO_TERMINAL=1 in the daemon.
+
+function homectl-attach -d "Mirror this terminal in the homectl app (restarts this shell inside the wrapper, keeping cwd and exported variables)"
+    if set -q HOMECTL_WINDOW
+        echo "already mirrored"; return 0
+    end
+    if not command -q homectl-pty
+        echo "homectl-pty not found in PATH" >&2; return 1
+    end
+    exec homectl-pty -- (status fish-path)
+end
+
+if status is-interactive; and not set -q HOMECTL_WINDOW; and not set -q HOMECTL_NO_MIRROR; and command -q homectl-pty
+    homectl-attach
+end

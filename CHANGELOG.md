@@ -1,7 +1,12 @@
 # Changelog
 
 All notable changes to homectl, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/), with
-`## [version] - date` headings. The app and the daemon share one version number.
+`## Unreleased
+
+- **Terminals mirror themselves.** New fish shells start inside `homectl-pty` through `packaging/shell/homectl.fish` (copy it to `~/.config/fish/conf.d/`). `homectl-attach` does the same for a shell that is already open. The new `homectl-adopt` helper (runs beside the daemon, started by `homectl-launch`) does it for you: it finds idle fish shells that are not wrapped yet, borrows the terminal's pty with `pidfd_getfd` and types `homectl-attach`. Needs yama `ptrace_scope` 0; off with `HOMECTL_NO_ADOPT=1` or `HOMECTL_NO_TERMINAL=1`.
+- The app says so when saved logins were lost on a reinstall (Android removes the keys), and no longer half-restores a backup.
+
+## [version] - date` headings. The app and the daemon share one version number.
 
 ## [Unreleased]
 

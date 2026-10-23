@@ -17,8 +17,16 @@ session_env() {
 	done
 }
 
+# Moves terminals that were open before the daemon started into homectl-pty so they get mirrored (see zig/adopt.zig).
+# Opt out with HOMECTL_NO_ADOPT=1 in /etc/conf.d/homectl.
+adopt=
+if command -v homectl-adopt >/dev/null 2>&1 && [ -z "${HOMECTL_NO_ADOPT:-}" ]; then
+	homectl-adopt &
+	adopt=$!
+fi
+
 child=
-trap '[ -n "$child" ] && kill "$child" 2>/dev/null; exit 0' TERM INT
+trap '[ -n "$child" ] && kill "$child" 2>/dev/null; [ -n "$adopt" ] && kill "$adopt" 2>/dev/null; exit 0' TERM INT
 
 while :; do
 	ready=0; session_ready && ready=1
@@ -32,7 +40,7 @@ while :; do
 			kill -USR1 $$ 2>/dev/null
 		) &
 		watcher=$!
-		trap 'kill "$child" "$watcher" 2>/dev/null; exit 0' TERM INT
+		trap 'kill "$child" "$watcher" $adopt 2>/dev/null; exit 0' TERM INT
 		trap 'kill "$child" 2>/dev/null' USR1
 	fi
 	wait "$child"; rc=$?
@@ -41,5 +49,6 @@ while :; do
 	[ -n "${watcher:-}" ] && kill "$watcher" 2>/dev/null
 	# 143 = we stopped it for the restart above; any other exit goes back to the supervisor
 	[ "$rc" = 143 ] && [ "$ready" = 0 ] && { ready=1; continue; }
+	[ -n "$adopt" ] && kill "$adopt" 2>/dev/null
 	exit "$rc"
 done

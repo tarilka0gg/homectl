@@ -22,4 +22,4 @@ export CARGO_ENCODED_RUSTFLAGS="$(printf -- '-Clink-self-contained=no\037-Ctarge
 cargo build --release --target x86_64-unknown-linux-musl
 rm -f "$ZIGCC"
 echo "built target/x86_64-unknown-linux-musl/release/homectl"
-(cd zig && zig build -Doptimize=ReleaseSmall -Dtarget=x86_64-linux-musl -Dcpu=x86_64 --prefix ../target/x86_64-unknown-linux-musl/release/zig) && echo "built target/x86_64-unknown-linux-musl/release/zig/bin/homectl-pty"
+(cd zig && zig build -Doptimize=ReleaseSmall -Dtarget=x86_64-linux-musl -Dcpu=x86_64 --prefix ../target/x86_64-unknown-linux-musl/release/zig) && echo "built target/x86_64-unknown-linux-musl/release/zig/bin/homectl-pty and homectl-adopt"

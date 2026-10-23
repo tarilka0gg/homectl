@@ -70,3 +70,7 @@ turns terminal mirroring and input off; `HOMECTL_NO_DELETE=1` also stops closing
 * The screen model covers what shells and common full-screen programs (less, vim, htop, tmux) use. It is not a complete
   xterm: no mouse reporting, no sixel or images, no bracketed paste markers, combining characters are dropped.
 * The phone's view is the size of the window on the machine; it scrolls rather than reflowing.
+
+## Mirroring terminals that are already open
+
+New fish shells wrap themselves (`packaging/shell/homectl.fish`). For windows that were open before, `homectl-adopt` (started by `homectl-launch`) looks every three seconds for fish shells of your user that are idle at the prompt (no foreground program, no keyboard input for 8 s) and not yet wrapped, duplicates the terminal's pty master with `pidfd_getfd` and types `homectl-attach` into it; the shell then restarts inside `homectl-pty`, keeping the folder and exported variables but not background jobs. Each shell is tried once. It needs the kernel to let you duplicate your own processes' fds (`/proc/sys/kernel/yama/ptrace_scope` = 0) and does nothing otherwise. Turn it off with `HOMECTL_NO_ADOPT=1` (or `HOMECTL_NO_TERMINAL=1`).
