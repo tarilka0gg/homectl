@@ -12,6 +12,7 @@ BIN=${2:-$H/homectl/homectl}
 [ -x "$BIN" ] || { echo "homectl binary not found or not executable: $BIN"; exit 1; }
 DIR=$(cd "$(dirname "$0")" && pwd)
 
+install -m 755 "$DIR/homectl-launch.sh" /usr/local/bin/homectl-launch
 install -m 755 "$DIR/homectl.initd" /etc/init.d/homectl
 if [ ! -f /etc/conf.d/homectl ]; then
 	printf 'HOMECTL_USER=%s\nHOMECTL_BIN=%s\n' "$U" "$BIN" > /etc/conf.d/homectl

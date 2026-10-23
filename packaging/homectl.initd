@@ -9,7 +9,8 @@ description="homectl control daemon"
 : "${HOMECTL_BIN:=/usr/local/bin/homectl}"
 
 supervisor=supervise-daemon
-command="$HOMECTL_BIN"
+command="/usr/local/bin/homectl-launch"
+command_args="$HOMECTL_BIN"
 command_user="$HOMECTL_USER"
 output_log="/var/log/homectl.log"
 error_log="/var/log/homectl.log"
@@ -32,12 +33,4 @@ start_pre() {
 	export HOME
 	PATH="$HOME/.local/bin:$PATH"
 	export PATH
-	# on a desktop, let it see the user's audio, clipboard and screens once they are logged in
-	uid="$(id -u "$HOMECTL_USER")"
-	if [ -d "/run/user/$uid" ]; then
-		export XDG_RUNTIME_DIR="/run/user/$uid"
-		for s in "/run/user/$uid"/wayland-*; do
-			case "$s" in *.lock) ;; *) [ -S "$s" ] && export WAYLAND_DISPLAY="${s##*/}" && break ;; esac
-		done
-	fi
 }
