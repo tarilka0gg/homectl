@@ -72,16 +72,24 @@ fun SliderRow(label: String, value: Float, max: Float = 100f, min: Float = 0f, e
     }
 }
 
-/** A switch that follows the real state: it flips immediately and is corrected by the next refresh. */
+/**
+ * A switch that follows the real state: it flips immediately and is corrected by the refresh. A flip the machine did not confirm
+ * (refused, a password that was cancelled, a service that failed to start) goes back after a few seconds; it used to stay wrong
+ * until the real state happened to change.
+ */
 @Composable
 fun SwitchRow(label: String, checked: Boolean, sub: String? = null, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
-    var local by remember(checked) { mutableStateOf(checked) }
+    var local by remember { mutableStateOf(checked) }
+    var touched by remember { mutableIntStateOf(0) }
+    val real by rememberUpdatedState(checked)
+    LaunchedEffect(checked) { local = checked }
+    LaunchedEffect(touched) { if (touched > 0) { delay(4000); local = real } }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
         Column(Modifier.weight(1f)) {
             Text(label, style = MaterialTheme.typography.bodyLarge)
             if (sub != null) Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Switch(local, { local = it; onChange(it) }, enabled = enabled)
+        Switch(local, { local = it; touched++; onChange(it) }, enabled = enabled)
     }
 }
 

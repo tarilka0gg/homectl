@@ -3,6 +3,12 @@
 All notable changes to homectl, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/), with
 `## [version] - date` headings. The app and the daemon share one version number.
 
+## [Unreleased]
+
+### Fixed
+- **Switches no longer stay in the wrong position.** A switch flips the moment you tap it and is corrected by the next refresh, but the correction only came when the real state *changed*: if a service refused to start, a root-password prompt was cancelled, or the machine said no, the switch kept showing the new position until you left the page (checked in the emulator: still "on" 8 seconds after cancelling the prompt). It now goes back to what the machine reports after a few seconds. This applies to every switch in the app (services, lights, tunnel, security).
+- **The services list redraws only when it changed.** A refresh used to replace the list and redraw all 56 rows every 6 seconds even when nothing was different; rows are now keyed by service name and an unchanged list is left alone.
+
 ## [0.19.1] - 2026-10-26
 
 ### Changed (memory)

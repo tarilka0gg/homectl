@@ -174,21 +174,28 @@ fun SystemScreen(onAddMachine: () -> Unit) {
     }
 
     var nonce by remember { mutableIntStateOf(0) }
-    val svc = loaded(nonce, 6000, "sys-svc") { Hc.array("/api/services") }
+    // the list is only replaced when it changed, so a refresh that found nothing new does not redraw every row
+    val lastSvc = remember { arrayOfNulls<Pair<String, org.json.JSONArray>>(1) }
+    val svc = loaded(nonce, 6000, "sys-svc") {
+        Hc.array("/api/services")?.let { a ->
+            val t = a.toString()
+            lastSvc[0]?.takeIf { it.first == t }?.second ?: a.also { lastSvc[0] = t to a }
+        }
+    }
     var filter by remember { mutableStateOf("") }
     Section("Services") {
         OutlinedTextField(filter, { filter = it }, Modifier.fillMaxWidth(), label = { Text("Filter") }, singleLine = true)
         svc.value?.objs()?.filter { filter.isBlank() || it.str("name").contains(filter, true) }?.forEach { s ->
             val n = s.str("name")
             val running = s.str("state") == "started"
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            key(n) { Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) {
                     SwitchRow(n, running, s.str("state")) { on ->
                         scope.launch { Hc.cur?.privPost("/api/services/$n/${if (on) "start" else "stop"}"); delay(800); nonce++ }
                     }
                 }
                 if (running) TextButton({ scope.launch { Hc.cur?.privPost("/api/services/$n/restart"); delay(800); nonce++ } }) { Text("Restart") }
-            }
+            } }
         } ?: Text("Loading…")
     }
 
