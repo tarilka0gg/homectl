@@ -4,13 +4,7 @@
 use serde_json::{json, Map, Value};
 use std::{collections::HashMap, time::Instant};
 
-fn read(p: &str) -> String {
-    std::fs::read_to_string(p).unwrap_or_default()
-}
-
-fn num(p: &str) -> Option<f64> {
-    read(p).trim().parse().ok()
-}
+use crate::procfs::{num, read};
 
 fn round(v: f64, places: i32) -> f64 {
     let k = 10f64.powi(places);
@@ -204,18 +198,42 @@ fn misc() -> Value {
 }
 
 /// Every hwmon chip with all of its temperature, fan, voltage, current and power inputs, plus thermal zones no chip covers.
-fn hwmon_sensors() -> Value {
-    let mut chips: Vec<Value> = vec![];
+/// Which files exist (and the labels and limits) does not change while the machine runs, so that layout is discovered once a
+/// minute and each sample only reads the values.
+struct Input {
+    kind: &'static str,
+    path: String,
+    label: String,
+    max: Option<f64>,
+    crit: Option<f64>,
+    scale: f64,
+    places: i32,
+}
+
+struct Chip {
+    name: String,
+    inputs: Vec<Input>,
+}
+
+struct Layout {
+    at: Instant,
+    chips: Vec<Chip>,
+    /// thermal zones no hwmon chip covers: (type, temp file)
+    zones: Vec<(String, String)>,
+}
+
+fn discover_hwmon() -> Layout {
+    let mut chips = vec![];
     let mut names = std::collections::HashSet::new();
     let mut dirs: Vec<_> = std::fs::read_dir("/sys/class/hwmon").into_iter().flatten().flatten().map(|e| e.path()).collect();
     dirs.sort();
     for d in dirs {
         let d = d.display().to_string();
-        let chip = read(&format!("{d}/name")).trim().to_string();
-        let mut items = vec![];
+        let name = read(&format!("{d}/name")).trim().to_string();
+        let mut inputs = vec![];
         // input numbers are not contiguous (coretemp has temp1, temp2, temp6, temp10 …): list the files instead of counting
         let files: Vec<String> = std::fs::read_dir(&d).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-        let mut add = |kind: &str, prefix: &str, scale: f64, places: i32, unit_suffix: &str| {
+        let mut add = |kind: &'static str, prefix: &str, scale: f64, places: i32| {
             let mut idx: Vec<u32> = files
                 .iter()
                 .filter_map(|f| f.strip_prefix(prefix)?.strip_suffix("_input").or_else(|| f.strip_prefix(prefix)?.strip_suffix("_average"))?.parse().ok())
@@ -223,23 +241,34 @@ fn hwmon_sensors() -> Value {
             idx.sort_unstable();
             idx.dedup();
             for i in idx {
-                let Some(v) = num(&format!("{d}/{prefix}{i}_input")).or_else(|| num(&format!("{d}/{prefix}{i}_average"))) else { continue };
+                let input = format!("{d}/{prefix}{i}_input");
+                let path = if num(&input).is_some() { input } else { format!("{d}/{prefix}{i}_average") };
+                if num(&path).is_none() {
+                    continue;
+                }
                 let label = read(&format!("{d}/{prefix}{i}_label")).trim().to_string();
-                let max = num(&format!("{d}/{prefix}{i}_max")).map(|m| round(m / scale, places));
-                let crit = num(&format!("{d}/{prefix}{i}_crit")).map(|m| round(m / scale, places));
-                items.push(json!({"kind": kind, "label": if label.is_empty() { format!("{prefix}{i}{unit_suffix}") } else { label }, "value": round(v / scale, places), "max": max, "crit": crit}));
+                inputs.push(Input {
+                    kind,
+                    path,
+                    label: if label.is_empty() { format!("{prefix}{i}") } else { label },
+                    max: num(&format!("{d}/{prefix}{i}_max")).map(|m| round(m / scale, places)),
+                    crit: num(&format!("{d}/{prefix}{i}_crit")).map(|m| round(m / scale, places)),
+                    scale,
+                    places,
+                });
             }
         };
-        add("temp", "temp", 1000.0, 1, "");
-        add("fan", "fan", 1.0, 0, "");
-        add("volt", "in", 1000.0, 3, "");
-        add("curr", "curr", 1000.0, 3, "");
-        add("power", "power", 1e6, 2, "");
-        if !items.is_empty() {
-            names.insert(chip.clone());
-            chips.push(json!({"chip": chip, "items": items}));
+        add("temp", "temp", 1000.0, 1);
+        add("fan", "fan", 1.0, 0);
+        add("volt", "in", 1000.0, 3);
+        add("curr", "curr", 1000.0, 3);
+        add("power", "power", 1e6, 2);
+        if !inputs.is_empty() {
+            names.insert(name.clone());
+            chips.push(Chip { name, inputs });
         }
     }
+    let mut zones = vec![];
     for z in std::fs::read_dir("/sys/class/thermal").into_iter().flatten().flatten() {
         let p = z.path().display().to_string();
         if !z.file_name().to_string_lossy().starts_with("thermal_zone") {
@@ -249,9 +278,36 @@ fn hwmon_sensors() -> Value {
         if names.contains(&ty) || ty.starts_with("acpitz") {
             continue;
         }
-        if let Some(t) = num(&format!("{p}/temp")) {
-            chips.push(json!({"chip": format!("thermal: {ty}"), "items": [{"kind": "temp", "label": ty, "value": round(t / 1000.0, 1), "max": null, "crit": null}]}));
+        zones.push((ty, format!("{p}/temp")));
+    }
+    Layout { at: Instant::now(), chips, zones }
+}
+
+fn hwmon_sensors() -> Value {
+    static LAYOUT: std::sync::Mutex<Option<Layout>> = std::sync::Mutex::new(None);
+    let mut g = LAYOUT.lock().unwrap();
+    if g.as_ref().is_none_or(|l| l.at.elapsed().as_secs() > 60) {
+        *g = Some(discover_hwmon());
+    }
+    let l = g.as_ref().unwrap();
+    let mut out: Vec<Value> = Vec::with_capacity(l.chips.len() + l.zones.len());
+    for c in &l.chips {
+        let items: Vec<Value> = c
+            .inputs
+            .iter()
+            .filter_map(|i| {
+                let v = num(&i.path)?;
+                Some(json!({"kind": i.kind, "label": i.label, "value": round(v / i.scale, i.places), "max": i.max, "crit": i.crit}))
+            })
+            .collect();
+        if !items.is_empty() {
+            out.push(json!({"chip": c.name, "items": items}));
         }
     }
-    json!(chips)
+    for (ty, path) in &l.zones {
+        if let Some(t) = num(path) {
+            out.push(json!({"chip": format!("thermal: {ty}"), "items": [{"kind": "temp", "label": ty, "value": round(t / 1000.0, 1), "max": null, "crit": null}]}));
+        }
+    }
+    json!(out)
 }

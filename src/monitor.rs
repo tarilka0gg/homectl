@@ -18,8 +18,9 @@ const CLK_TCK: f64 = 100.0;
 pub struct ProcRow {
     pub pid: u32,
     pub name: String,
-    pub cmd: String,
-    pub user: String,
+    /// shared with the cache of command lines / the user table, so a sample does not copy them for every process
+    pub cmd: std::sync::Arc<str>,
+    pub user: std::sync::Arc<str>,
     pub cpu: f64,
     pub mem: u64,
     pub state: char,
@@ -93,19 +94,13 @@ impl Shared {
         let list: Vec<Value> = rows
             .into_iter()
             .take(limit)
-            .map(|p| json!({"pid": p.pid, "name": p.name, "cmd": p.cmd, "user": p.user, "cpu": (p.cpu * 10.0).round() / 10.0, "mem": p.mem, "state": p.state.to_string(), "threads": p.threads}))
+            .map(|p| json!({"pid": p.pid, "name": p.name, "cmd": &*p.cmd, "user": &*p.user, "cpu": (p.cpu * 10.0).round() / 10.0, "mem": p.mem, "state": p.state.to_string(), "threads": p.threads}))
             .collect();
         json!({"total": all.len(), "matched": total, "procs": list})
     }
 }
 
-fn read(p: &str) -> String {
-    std::fs::read_to_string(p).unwrap_or_default()
-}
-
-fn num(p: &str) -> Option<f64> {
-    read(p).trim().parse().ok()
-}
+use crate::procfs::{num, read};
 
 fn cpu_times() -> Vec<(u64, u64)> {
     read("/proc/stat")
@@ -205,17 +200,19 @@ fn disk_temp(name: &str) -> Option<f64> {
 }
 
 /// Processes' cumulative disk bytes (only those we are allowed to read, i.e. our own).
-fn proc_io() -> HashMap<u32, (String, u64, u64)> {
-    let Ok(dir) = std::fs::read_dir("/proc") else { return HashMap::new() };
-    dir.flatten()
-        .filter_map(|e| {
-            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
-            let t = std::fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
-            let get = |k: &str| t.lines().find_map(|l| l.strip_prefix(k)?.trim().parse::<u64>().ok()).unwrap_or(0);
-            let name = read(&format!("/proc/{pid}/comm")).trim().to_string();
-            Some((pid, (name, get("read_bytes:"), get("write_bytes:"))))
-        })
-        .collect()
+/// Cumulative bytes read/written per process (the processes this user may look at). Names are looked up only for the few that matter.
+fn proc_io(sized_for: usize) -> HashMap<u32, (u64, u64)> {
+    use std::fmt::Write;
+    let mut out = HashMap::with_capacity(sized_for);
+    let (mut path, mut buf) = (String::with_capacity(32), [0u8; 512]);
+    crate::procfs::for_each_pid(|pid| {
+        path.clear();
+        let _ = write!(path, "/proc/{pid}/io");
+        let Some(t) = crate::procfs::read_into(&path, &mut buf) else { return };
+        let get = |k: &str| t.lines().find_map(|l| l.strip_prefix(k)?.trim().parse::<u64>().ok()).unwrap_or(0);
+        out.insert(pid, (get("read_bytes:"), get("write_bytes:")));
+    });
+    out
 }
 
 struct RawProc {
@@ -229,32 +226,46 @@ struct RawProc {
 }
 
 fn raw_procs() -> Vec<RawProc> {
-    let Ok(dir) = std::fs::read_dir("/proc") else { return vec![] };
-    dir.filter_map(|e| {
-        let e = e.ok()?;
-        let pid: u32 = e.file_name().to_str()?.parse().ok()?;
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        let (l, r) = (stat.find('(')?, stat.rfind(')')?);
-        let f: Vec<&str> = stat[r + 2..].split_whitespace().collect();
-        Some(RawProc {
-            pid,
-            name: stat[l + 1..r].to_string(),
-            state: f.first()?.chars().next()?,
-            ticks: f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?,
-            threads: f.get(17)?.parse().ok()?,
-            rss: f.get(21)?.parse::<u64>().ok()? * 4096,
-            uid: e.metadata().map_or(0, |m| m.uid()),
-        })
-    })
-    .collect()
+    use std::fmt::Write;
+    let mut out = Vec::with_capacity(768);
+    // one path string and one buffer for every process, instead of a new String, a read buffer that grows and a Vec of fields each
+    let (mut path, mut buf) = (String::with_capacity(32), [0u8; 1024]);
+    crate::procfs::for_each_pid(|pid| {
+        path.clear();
+        let _ = write!(path, "/proc/{pid}/stat");
+        let Some(stat) = crate::procfs::read_into(&path, &mut buf) else { return };
+        let (Some(l), Some(r)) = (stat.find('('), stat.rfind(')')) else { return };
+        // fields after the command name: 0 state, 11 utime, 12 stime, 17 threads, 21 rss (pages)
+        let (mut state, mut utime, mut stime, mut threads, mut rss) = (None, None, None, None, None);
+        for (i, tok) in stat.get(r + 2..).unwrap_or("").split_ascii_whitespace().enumerate() {
+            match i {
+                0 => state = tok.chars().next(),
+                11 => utime = tok.parse::<u64>().ok(),
+                12 => stime = tok.parse::<u64>().ok(),
+                17 => threads = tok.parse().ok(),
+                21 => {
+                    rss = tok.parse::<u64>().ok();
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let (Some(state), Some(utime), Some(stime), Some(threads), Some(rss)) = (state, utime, stime, threads, rss) else { return };
+        // the owner of /proc/<pid> is the process's user (the path buffer is short, so this does not allocate either)
+        path.clear();
+        let _ = write!(path, "/proc/{pid}");
+        let uid = std::fs::symlink_metadata(&path).map_or(0, |m| m.uid());
+        out.push(RawProc { pid, name: stat[l + 1..r].to_string(), state, ticks: utime + stime, threads, rss: rss * 4096, uid });
+    });
+    out
 }
 
-fn passwd() -> HashMap<u32, String> {
+fn passwd() -> HashMap<u32, std::sync::Arc<str>> {
     read("/etc/passwd")
         .lines()
         .filter_map(|l| {
             let f: Vec<&str> = l.split(':').collect();
-            Some((f.get(2)?.parse().ok()?, f.first()?.to_string()))
+            Some((f.get(2)?.parse().ok()?, std::sync::Arc::from(*f.first()?)))
         })
         .collect()
 }
@@ -579,10 +590,11 @@ pub fn start() -> Monitor {
         let mut prev_net: HashMap<String, (u64, u64)> = net_ifaces().into_iter().map(|i| (i.name, (i.rx, i.tx))).collect();
         let (mut prev_dr, mut prev_dw) = disk_sectors();
         let mut prev_dev: HashMap<String, DiskRaw> = disk_devs().into_iter().collect();
-        let mut prev_pio = proc_io();
+        let mut prev_pio = proc_io(256);
         let mut dev_info: HashMap<String, Value> = HashMap::new();
         let mut prev_ticks: HashMap<u32, u64> = raw_procs().into_iter().map(|p| (p.pid, p.ticks)).collect();
-        let mut cmds: HashMap<u32, String> = HashMap::new();
+        let mut next_ticks: HashMap<u32, u64> = HashMap::with_capacity(prev_ticks.len() + 64);
+        let mut cmds: HashMap<u32, std::sync::Arc<str>> = HashMap::new();
         let (mut rx_peak, mut tx_peak, mut dr_peak, mut dw_peak) = (0f64, 0f64, 0f64, 0f64);
         let mut last = Instant::now();
         let mut disk_cache = disks();
@@ -665,30 +677,37 @@ pub fn start() -> Monitor {
             }
 
             // which processes are reading/writing right now (own processes unless running as root)
-            let pio = proc_io();
-            let mut io_rows: Vec<(f64, Value)> = pio
+            let pio = proc_io(prev_pio.len() + 32);
+            let mut io_rows: Vec<(f64, u32, f64, f64)> = pio
                 .iter()
-                .filter_map(|(pid, (name, r, w))| {
-                    let (pr, pw) = prev_pio.get(pid).map(|(_, a, b)| (*a, *b))?;
+                .filter_map(|(pid, (r, w))| {
+                    let (pr, pw) = prev_pio.get(pid).copied()?;
                     let (rr, ww) = (r.saturating_sub(pr) as f64 / dt, w.saturating_sub(pw) as f64 / dt);
-                    (rr + ww >= 1024.0).then(|| (rr + ww, json!({"pid": pid, "name": name, "read_bps": rr, "write_bps": ww})))
+                    (rr + ww >= 1024.0).then_some((rr + ww, *pid, rr, ww))
                 })
                 .collect();
             io_rows.sort_by(|a, b| b.0.total_cmp(&a.0));
-            let disk_procs: Vec<Value> = io_rows.into_iter().take(8).map(|x| x.1).collect();
+            // only the few that are shown need their name
+            let disk_procs: Vec<Value> = io_rows
+                .into_iter()
+                .take(8)
+                .map(|(_, pid, rr, ww)| json!({"pid": pid, "name": read(&format!("/proc/{pid}/comm")).trim(), "read_bps": rr, "write_bps": ww}))
+                .collect();
             prev_pio = pio;
 
-            // processes
+            // processes: strings are shared with the caches and the maps are reused, so a sample allocates little per process
             let ps = raw_procs();
-            let mut rows: Vec<ProcRow> = ps
-                .iter()
-                .map(|p| {
-                    let cpu = prev_ticks.get(&p.pid).map_or(0.0, |&t| 100.0 * p.ticks.saturating_sub(t) as f64 / (CLK_TCK * dt));
-                    let cmd = cmds.entry(p.pid).or_insert_with(|| cmdline(p.pid)).clone();
-                    ProcRow { pid: p.pid, name: p.name.clone(), cmd: if cmd.is_empty() { format!("[{}]", p.name) } else { cmd }, user: users.get(&p.uid).cloned().unwrap_or_else(|| p.uid.to_string()), cpu, mem: p.rss, state: p.state, threads: p.threads }
-                })
-                .collect();
-            prev_ticks = ps.iter().map(|p| (p.pid, p.ticks)).collect();
+            next_ticks.clear();
+            let mut rows: Vec<ProcRow> = Vec::with_capacity(ps.len());
+            for p in ps {
+                let cpu = prev_ticks.get(&p.pid).map_or(0.0, |&t| 100.0 * p.ticks.saturating_sub(t) as f64 / (CLK_TCK * dt));
+                next_ticks.insert(p.pid, p.ticks);
+                let cmd = cmds.entry(p.pid).or_insert_with(|| std::sync::Arc::from(cmdline(p.pid))).clone();
+                let cmd = if cmd.is_empty() { std::sync::Arc::from(format!("[{}]", p.name)) } else { cmd };
+                let user = users.get(&p.uid).cloned().unwrap_or_else(|| std::sync::Arc::from(p.uid.to_string()));
+                rows.push(ProcRow { pid: p.pid, name: p.name, cmd, user, cpu, mem: p.rss, state: p.state, threads: p.threads });
+            }
+            std::mem::swap(&mut prev_ticks, &mut next_ticks);
             cmds.retain(|pid, _| prev_ticks.contains_key(pid));
             let nproc = rows.len();
             rows.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));

@@ -11,6 +11,7 @@ mod monitor;
 mod net;
 mod pair;
 mod privileged;
+mod procfs;
 mod relay;
 mod sensors;
 mod swr;
