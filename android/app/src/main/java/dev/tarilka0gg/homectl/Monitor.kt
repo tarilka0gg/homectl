@@ -92,7 +92,7 @@ fun MonitorScreen() {
     if (Hc.machines.size > 1) Fleet()
     val d = data.value
     if (d == null) {
-        Text(if (Hc.cur?.offline == true) "Machine is offline." else "Loading…")
+        Text(if (Hc.cur?.offline == true) "Machine is offline." else Hc.cur?.authProblem?.let { "This machine doesn't accept this phone yet: $it" } ?: "Loading…")
         if (Hc.cur?.offline == true) Hc.cur?.let { ConnectionTest(it, autoRun = true) }
         return
     }

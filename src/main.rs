@@ -95,6 +95,11 @@ pub(crate) fn device_gate(app: &App, headers: &HeaderMap, peer: Option<SocketAdd
     if !outside && !always {
         return Ok(());
     }
+    // "Always" needs at least one registered phone: with none (the list was lost or wiped) nothing could ever sign in again, so a
+    // phone that holds the access token may register from the home network, exactly as before "always" was switched on.
+    if !outside && app.devices.count() == 0 && method == "POST" && path_query.split('?').next() == Some("/api/devices") {
+        return Ok(());
+    }
     let deny = |why: &str| {
         // the path only: never the query (it can hold the access token) or any signature
         eprintln!("refused {method} {}: {why}{}", path_query.split('?').next().unwrap_or(""), if outside { " (through the tunnel)" } else { "" });

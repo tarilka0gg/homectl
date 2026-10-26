@@ -46,6 +46,8 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
     var endpoints by mutableStateOf(endpoints)
     var active by mutableStateOf<Endpoint?>(null)
     var offline by mutableStateOf(false)
+    /** Set when an address answers but the machine rejects this phone's signature; the app stays usable and says why. */
+    var authProblem by mutableStateOf<String?>(null)
 
     // same network first; away from home the tunnel, then the route through another machine; the self-hosted tailnet last
     private val order = listOf("lan", "tunnel", "server", "tailscale")
@@ -105,8 +107,12 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
                 if (c2.responseCode == 401) {
                     val why = runCatching { JSONObject(c2.errorStream?.bufferedReader()?.readText().orEmpty()).optString("why") }.getOrDefault("")
                     Hc.memPutBool("enrolled.$id", false)
-                    return@withContext Probe(e, false, System.currentTimeMillis() - t0, "reachable, but this phone isn't registered with the machine" + (if (why.isNotBlank()) " ($why)" else "") + " — open the app once on the home network (Wi-Fi or Tailscale)")
+                    val msg = "answers, but this phone isn't registered with the machine" + (if (why.isNotBlank()) " ($why)" else "") + " — open the app once on the home network (Wi-Fi or Tailscale)"
+                    authProblem = msg
+                    // the address is alive, so it stays selectable: the app opens instead of showing "offline" for good
+                    return@withContext Probe(e, true, System.currentTimeMillis() - t0, msg)
                 }
+                authProblem = null
             }
             Probe(e, ok, System.currentTimeMillis() - t0, if (ok) "answered" else "answered with HTTP $code, but not homectl")
         } catch (ex: Exception) {
@@ -142,6 +148,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         if (active == null && lookupAnnouncedTunnel()) pick()
         offline = active == null
         if (active != null) certProblem = false
+        if (active == null) authProblem = null
         active?.let { refreshEndpoints(it) }
         if (active != null) { syncSecurity(); Hc.autoLinkAll() }
         return active
@@ -240,9 +247,9 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         }
     }
 
-    private suspend fun raw(e: Endpoint, method: String, path: String, body: String? = null): String? = withContext(Dispatchers.IO) {
+    private suspend fun raw(e: Endpoint, method: String, path: String, body: String? = null, forceSign: Boolean = false): String? = withContext(Dispatchers.IO) {
         try {
-            val c = Net.open(urlOf(e), method, path, e.token ?: token, 4000, connectMs = 2000, pin = pinFor(e), sign = signFor(e))
+            val c = Net.open(urlOf(e), method, path, e.token ?: token, 4000, connectMs = 2000, pin = pinFor(e), sign = forceSign || signFor(e))
             if (body != null) {
                 c.doOutput = true
                 c.setRequestProperty("Content-Type", "application/json")
@@ -251,7 +258,12 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
             val code = c.responseCode
             val text = (if (code < 400) c.inputStream else c.errorStream)?.bufferedReader()?.readText() ?: ""
             // the machine forgot this phone (or never knew it): register again the next time it is reached directly
-            if (code == 401 && text.contains("device_required")) Hc.memPutBool("enrolled.$id", false)
+            if (code == 401 && text.contains("device_required")) {
+                Hc.memPutBool("enrolled.$id", false)
+                authProblem = runCatching { JSONObject(text).optString("why") }.getOrDefault("").ifBlank { "this machine wants requests signed by a registered phone" }
+                // the machine wants signatures on every request (the app forgets that when it restarts): sign from now on and try again
+                if (!forceSign && !signFor(e)) { deviceAlways = true; return@withContext raw(e, method, path, body, forceSign = true) }
+            } else if (code in 200..299) authProblem = null
             if (code in 200..299) text else null
         } catch (_: Exception) {
             null
@@ -534,6 +546,20 @@ object Hc {
 
     /** True when saved logins existed but could not be opened, so the user is told to pair again instead of just seeing an empty app. */
     var keysLost by mutableStateOf(false)
+    /** The saved logins exist but the keystore could not read them just now. Nothing is overwritten; "Try again" reads them anew. */
+    var loginsUnreadable by mutableStateOf(false)
+
+    /** Reads the saved logins again after a transient keystore failure. */
+    fun retryLogins(): Boolean {
+        val g = Keyring.get("machines", strong = false)
+        if (g is Keyring.Got.Value) {
+            machines.clear()
+            val a = JSONArray(g.text)
+            for (i in 0 until a.length()) a.getJSONObject(i).let { o -> machines.add(Machine(o.getString("id"), o.getString("name"), o.getString("token"), parseEndpoints(o.getJSONArray("endpoints")), o.optString("fp").ifBlank { null }, o.optString("rv").ifBlank { null })) }
+            loginsUnreadable = false
+        } else if (g is Keyring.Got.Lost) { loginsUnreadable = false; keysLost = true }
+        return !loginsUnreadable
+    }
     val cur: Machine? get() = machines.find { it.id == selectedId } ?: machines.firstOrNull()
 
     fun init(ctx: Context) {
@@ -550,7 +576,10 @@ object Hc {
         Diag.watchCrashes()
         Diag.noteExits(ctx)
         Diag.noteVersion(ctx)
-        val sealed = Keyring.get("machines", strong = false)
+        var sealed = Keyring.get("machines", strong = false)
+        // the keystore can be busy for a moment after an update or a boot: try again before giving up
+        for (i in 0..3) { if (sealed !is Keyring.Got.Unreadable) break; Thread.sleep(400); sealed = Keyring.get("machines", strong = false) }
+        if (sealed is Keyring.Got.Unreadable) { loginsUnreadable = true; Diag.log("saved logins cannot be read right now (keystore busy?)") }
         // the phone's key is gone (a reinstall removes it) or could not be read; the blob is kept, pairing again replaces it
         if (sealed is Keyring.Got.Lost) { keysLost = true; Diag.log("saved logins could not be opened (key lost or unreadable)") }
         else Diag.log("start: saved logins ${if (sealed is Keyring.Got.Value) "opened" else "none"}, device key ${DeviceKey.idOrNull() ?: "unreadable"}")
@@ -579,6 +608,7 @@ object Hc {
         (0 until a.length()).map { a.getJSONObject(it).let { o -> Endpoint(o.getString("kind"), o.getString("url"), o.optString("token").ifBlank { null }, o.optString("hub").ifBlank { null }) } }
 
     fun save() {
+        if (loginsUnreadable) return // never overwrite logins that could not be read
         val a = JSONArray()
         machines.forEach { m ->
             a.put(JSONObject().put("id", m.id).put("name", m.name).put("token", m.token).put("fp", m.fp ?: "").put("rv", m.rv ?: "").put("endpoints", JSONArray().also { ea ->

@@ -36,6 +36,7 @@ private enum class Tab(val label: String, val icon: ImageVector) {
 @Composable
 fun App() {
     var adding by remember { mutableStateOf(!Hc.paired) }
+    if (Hc.loginsUnreadable && !Hc.paired) return LoginsUnreadableScreen { adding = true; Hc.loginsUnreadable = false }
     if (adding || !Hc.paired) return AddMachineScreen(canCancel = Hc.paired) { adding = false }
     // the tab is remembered by name, so adding a tab never moves people to a different one
     var tab by remember { mutableStateOf(Tab.entries.firstOrNull { it.name == Hc.memStr("tab.name") } ?: Tab.Monitor) }
@@ -82,7 +83,7 @@ fun App() {
                 actions = {
                     AssistChip(
                         onClick = {},
-                        label = { Text(if (m.certProblem) "certificate!" else if (m.offline) "offline" else (m.active?.kind ?: "connecting…") + if (m.active?.let { m.pinFor(it) } != null) " 🔒" else "") },
+                        label = { Text(if (m.certProblem) "certificate!" else if (m.offline) "offline" else if (m.authProblem != null) "not registered" else (m.active?.kind ?: "connecting…") + if (m.active?.let { m.pinFor(it) } != null) " 🔒" else "") },
                         colors = AssistChipDefaults.assistChipColors(
                             containerColor = if (m.offline) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer,
                         ),
@@ -117,6 +118,23 @@ fun App() {
                     Tab.Terminal, Tab.Windows -> {}
                 }
             }
+        }
+    }
+}
+
+/** The keystore could not read the saved logins just now; they are still there, so offer a retry instead of forcing a new pairing. */
+@Composable
+private fun LoginsUnreadableScreen(pairAgain: () -> Unit) {
+    var tried by remember { mutableStateOf(false) }
+    Scaffold { pad ->
+        Column(Modifier.padding(pad).padding(24.dp).fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("Saved logins can't be read right now", style = MaterialTheme.typography.headlineSmall)
+            Spacer(Modifier.height(8.dp))
+            Text("Android's keystore is busy (it can be, just after an update or a restart). Nothing was deleted.", style = MaterialTheme.typography.bodyMedium)
+            if (tried) Text("Still not readable.", Modifier.padding(top = 8.dp), color = MaterialTheme.colorScheme.error)
+            Spacer(Modifier.height(16.dp))
+            Button({ tried = !Hc.retryLogins() }) { Text("Try again") }
+            TextButton(pairAgain) { Text("Pair a machine anyway") }
         }
     }
 }

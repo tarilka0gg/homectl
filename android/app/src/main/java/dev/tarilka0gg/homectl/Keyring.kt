@@ -95,6 +95,7 @@ object Keyring {
         data class Value(val text: String) : Got()
         object Missing : Got()
         object NeedsUnlock : Got()
+        object Unreadable : Got() // the key exists but could not be used just now (keystore busy); try again, never replace it
         object Lost : Got() // the key was removed (the screen lock was turned off or changed to none)
     }
 
@@ -106,6 +107,10 @@ object Keyring {
             Got.NeedsUnlock
         } catch (_: KeyPermanentlyInvalidatedException) {
             Got.Lost
+        } catch (e: java.io.IOException) {
+            Got.Unreadable
+        } catch (e: java.security.ProviderException) {
+            Got.Unreadable
         } catch (_: Exception) {
             Got.Lost
         }
@@ -138,7 +143,7 @@ object Keyring {
         for (attempt in 0..1) {
             when (val g = get(name)) {
                 is Got.Value -> return g.text
-                Got.Missing, Got.Lost -> return null
+                Got.Missing, Got.Lost, Got.Unreadable -> return null
                 Got.NeedsUnlock -> if (!authenticate(activity, "Unlock homectl", why)) return null
             }
         }

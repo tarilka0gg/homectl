@@ -3,6 +3,14 @@
 All notable changes to homectl, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/), with
 `## [version] - date` headings. The app and the daemon share one version number.
 
+## [0.18.8] - 2026-10-26
+
+### Fixed
+- **A failed login no longer locks the phone out of the app.** A machine that answers but rejects this phone (it forgot the phone, or asks for a signature the app had not sent) used to count as unreachable, so the app showed "offline" for good and never registered the phone again. The address now stays usable, the top bar says **not registered**, and the Monitor tab says why.
+- **The app signs requests as soon as a machine asks for it.** A machine set to require a signature on every request answered "device required" after the app restarted (it did not remember the setting) and the app stayed on "Loading…". It now switches to signing and retries, and registers the phone again when it is reached on the home network.
+- **Saved logins that cannot be read for a moment are not treated as lost.** The Android keystore can be busy after an update or a restart; the app used to throw the machine list away and ask for a new pairing, and a new pairing would overwrite the saved logins. It now retries, and if the keystore still does not answer it says so, with **Try again**, and writes nothing until the logins can be read.
+- **Daemon: a phone can register when the machine has none on record.** With "always sign" on and the device list lost, every request was refused, including the registration, so no phone could ever sign in again. A phone that holds the access token can now register from the home network in that one case, as it could before "always sign" was switched on.
+
 ## [0.18.7] - 2026-10-24
 
 ### Fixed
