@@ -870,7 +870,8 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("../web/index.html"))
 }
 
-#[tokio::main]
+// a control daemon is I/O bound: a few workers are plenty (the default is one per CPU core, 24 threads on a big laptop)
+#[tokio::main(worker_threads = 4)]
 async fn main() {
     let addr = std::env::var("HOMECTL_ADDR").unwrap_or_else(|_| "0.0.0.0:7878".into());
     let port: u16 = addr.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(7878);

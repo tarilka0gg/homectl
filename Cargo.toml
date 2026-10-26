@@ -29,3 +29,10 @@ wayland-protocols-wlr = { version = "0.3", default-features = false, features = 
 
 [build-dependencies]
 cc = "1"
+
+# Smaller, leaner daemon: one codegen unit with fat LTO drops unused code from the many dependencies, and stripping removes
+# symbols. Panics still unwind (a panic in one request task must not take the daemon down).
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
