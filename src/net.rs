@@ -145,16 +145,7 @@ pub async fn pair(port: u16, token: &str) {
     s.read_to_string(&mut buf).await.ok();
     let body = buf.split("\r\n\r\n").nth(1).unwrap_or("");
     let v: Value = serde_json::from_str(body).unwrap_or_default();
-    let mut link = format!("homectl://pair?t={token}&n={}", v["name"].as_str().unwrap_or("homectl"));
-    for u in v["urls"].as_array().into_iter().flatten() {
-        link.push_str(&format!("&u={}", u["url"].as_str().unwrap_or("")));
-    }
-    if let Some(fp) = v["fp"].as_str().filter(|f| !f.is_empty()) {
-        link.push_str(&format!("&fp={fp}"));
-    }
-    if let Some(rv) = v["rv"].as_str().filter(|f| !f.is_empty()) {
-        link.push_str(&format!("&rv={rv}"));
-    }
+    let link = crate::pairlink::link(&v, token);
     println!("{link}\n");
     let _ = std::process::Command::new("qrencode").args(["-t", "ANSIUTF8", &link]).status();
     // Phones that asked to pair by code appear here (also useful on servers without a desktop).

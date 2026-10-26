@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=homectl pairing
+Comment=Show the QR code and link to pair a phone with this machine
+Exec=homectl-pair
+Icon=phone
+Terminal=false
+Categories=Utility;Network;
+StartupNotify=true

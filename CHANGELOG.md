@@ -3,6 +3,14 @@
 All notable changes to homectl, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/), with
 `## [version] - date` headings. The app and the daemon share one version number.
 
+## [0.19.3] - 2026-10-26
+
+### Added
+- **`homectl-pair`, a window for pairing a phone.** It shows the QR code and the link (the link carries the access token, so it stays hidden until you press Show and hides again after two minutes), copies the link, and lists the phones that asked to pair with their 6-digit code. It is an ordinary window that follows the desktop's GTK 4 theme (`~/.config/gtk-4.0/gtk.css`) and floats in niri. Build it with `cargo build --release --features gui --bin homectl-pair`; it needs GTK 4 and `qrencode`. The daemon's `homectl pair` prints the same link as before.
+
+### Notes
+- The Android app is unchanged in this release and stays at 0.19.2.
+
 ## [0.19.2] - 2026-10-26
 
 ### Fixed

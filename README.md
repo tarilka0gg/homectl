@@ -59,6 +59,7 @@ Releases are on the **[Releases page](../../releases/latest)**:
 chmod +x homectl-linux-x86_64
 ./homectl-linux-x86_64              # HTTP and HTTPS on port 7878
 ./homectl-linux-x86_64 pair         # a homectl://pair… link and a QR code, plus any pairing request waiting for a code
+./homectl-pair                # the same, in a window (build: cargo build --release --features gui --bin homectl-pair; needs GTK 4 and qrencode). Shows the QR code and link only when you press Show
 ```
 
 It uses `brightnessctl`, `wpctl` / `pactl`, `nmcli`, `bluetoothctl`, `ddcutil`, `wl-clipboard`, `loginctl` and `doas` when they are there;

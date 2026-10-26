@@ -1,6 +1,6 @@
 [package]
 name = "homectl"
-version = "0.19.2"
+version = "0.19.3"
 edition = "2021"
 description = "Control my machines and smart home from one daemon + Android-friendly web UI"
 license = "GPL-2.0-or-later"
@@ -37,3 +37,18 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 opt-level = "s"
+
+# The pairing window (`homectl-pair`): needs GTK 4, so it is not part of the static daemon build.
+[features]
+gui = ["dep:gtk"]
+
+[dependencies.gtk]
+package = "gtk4"
+version = "0.11"
+optional = true
+features = ["v4_10"]
+
+[[bin]]
+name = "homectl-pair"
+path = "src/bin/homectl-pair.rs"
+required-features = ["gui"]

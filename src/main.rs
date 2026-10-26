@@ -10,6 +10,7 @@ mod govee_cloud;
 mod monitor;
 mod net;
 mod pair;
+mod pairlink;
 mod privileged;
 mod procfs;
 mod relay;
