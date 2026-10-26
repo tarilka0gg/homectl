@@ -137,11 +137,16 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
      * from it. All addresses are probed at once, but it does not wait for dead ones: it returns as soon as the best
      * address answers, or — when only a lower-priority one has answered — after a short grace period for better ones.
      */
-    suspend fun resolve(): Endpoint? {
-        // a route through another machine needs that machine's current address first
-        endpoints.mapNotNull { it.hub }.distinct().forEach { id -> Hc.machines.find { it.id == id }?.let { hub -> if (hub.active == null) hub.resolve() } }
+    suspend fun resolve(chain: Set<String> = emptySet()): Endpoint? {
+        // a route through another machine needs that machine's current address first. [chain] holds the machines already being
+        // resolved above this call: two machines that relay through each other (or one through itself) used to wait on each
+        // other forever, which overflowed the stack and closed the app the moment it opened with nothing reachable.
+        val here = chain + id
+        endpoints.mapNotNull { it.hub }.distinct().forEach { hid -> if (hid !in here) Hc.machines.find { it.id == hid }?.let { hub -> if (hub.active == null) hub.resolve(here) } }
         endpoints = endpoints.map { e ->
-            val hub = e.hub?.let { id -> Hc.machines.find { it.id == id } }?.active?.url ?: return@map e
+            val h = e.hub?.takeIf { it != id }?.let { hid -> Hc.machines.find { it.id == hid } }
+            // a relay is reached through the hub's own address, never through another relay
+            val hub = h?.active?.takeIf { it.kind != "server" }?.url ?: return@map e
             e.copy(url = hub + "/peer/" + e.url.substringAfterLast("/peer/"))
         }
         pick()
