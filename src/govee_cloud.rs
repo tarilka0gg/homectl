@@ -121,7 +121,9 @@ async fn call(method: &str, path: &str, body: Option<Value>) -> Option<Value> {
     if v["code"].as_i64() == Some(200) {
         Some(v)
     } else {
-        eprintln!("Govee cloud: {} {path} refused (code {})", method, v["code"]);
+        // Govee says why in `msg` (control, state) or `message` (device list); nothing here is secret
+        let why = v["msg"].as_str().or_else(|| v["message"].as_str()).unwrap_or("");
+        eprintln!("Govee cloud: {method} {path} refused (code {}: {why})", v["code"]);
         None
     }
 }
@@ -224,8 +226,12 @@ pub async fn lights(lan: &[Light], rescan: bool) -> Vec<Light> {
 }
 
 async fn control(d: &Dev, ty: &str, instance: &str, value: Value) -> bool {
-    let body = json!({"requestId": request_id(), "payload": {"sku": d.sku, "device": d.device, "capability": {"type": ty, "instance": instance, "value": value}}});
-    call("POST", "/router/api/v1/device/control", Some(body)).await.is_some()
+    let body = json!({"requestId": request_id(), "payload": {"sku": d.sku, "device": d.device, "capability": {"type": ty, "instance": instance, "value": value.clone()}}});
+    let ok = call("POST", "/router/api/v1/device/control", Some(body)).await.is_some();
+    if !ok {
+        eprintln!("Govee cloud: the refused command was {instance} = {value} for {}", d.sku);
+    }
+    ok
 }
 
 /// Same shape as the LAN command: any of power, brightness, colour or white temperature. `id` is `cloud-<device id>`.
