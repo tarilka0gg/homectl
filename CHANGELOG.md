@@ -3,7 +3,7 @@
 All notable changes to homectl, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/), with
 `## [version] - date` headings. The app and the daemon share one version number.
 
-## [Unreleased]
+## [0.19.2] - 2026-10-26
 
 ### Fixed
 - **The Monitor page no longer shifts under your finger while it refreshes.** The "Disk activity by process" card, just above the process list, shows 0 to 8 rows depending on what is writing to disk at that moment, so its height changed every second and pushed everything below it up and down (the process list moved by up to 222 px between refreshes, measured in the emulator with bursts of disk writes). That card now keeps the largest height it has had while you are on the page, and the process rows are keyed by PID so they are moved rather than redrawn in place. With the fix the list's header stayed at exactly one position through the same test.
