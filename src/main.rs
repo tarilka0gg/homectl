@@ -493,6 +493,12 @@ struct On {
     on: bool,
 }
 
+async fn bt_scan() -> impl IntoResponse {
+    Json(ctl::bluetooth_scan().await)
+}
+async fn ethernet_get() -> impl IntoResponse {
+    Json(ctl::ethernet().await)
+}
 async fn bt_get() -> impl IntoResponse {
     Json(ctl::bluetooth().await)
 }
@@ -502,6 +508,7 @@ async fn bt_power(Json(c): Json<On>) -> StatusCode {
 async fn bt_link(Path((mac, action)): Path<(String, String)>) -> StatusCode {
     match action.as_str() {
         "connect" | "disconnect" => status(ctl::bluetooth_link(&mac, action == "connect").await),
+        "pair" => status(ctl::bluetooth_pair(&mac).await),
         _ => StatusCode::BAD_REQUEST,
     }
 }
@@ -652,6 +659,58 @@ async fn cam_get(Path(n): Path<u8>) -> Response {
 struct CamSet {
     id: u32,
     value: i32,
+}
+
+async fn cam_frame(Path(n): Path<u8>) -> Response {
+    match ctl::webcam_frame(n).await {
+        Some(jpg) => ([(axum::http::header::CONTENT_TYPE, "image/jpeg"), (axum::http::header::CACHE_CONTROL, "no-store")], jpg).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn cam_stream(Path(n): Path<u8>) -> Response {
+    let Some(mut child) = ctl::webcam_stream(n) else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(out) = child.stdout.take() else { return StatusCode::NOT_FOUND.into_response() };
+    // the child lives as long as the body: when the phone disconnects the body is dropped and ffmpeg is killed with it
+    let body = axum::body::Body::from_stream(futures_util::stream::unfold((tokio_util::io::ReaderStream::new(out), child), |(mut s, c)| async move {
+        futures_util::StreamExt::next(&mut s).await.map(|chunk| (chunk, (s, c)))
+    }));
+    ([(axum::http::header::CONTENT_TYPE, "multipart/x-mixed-replace; boundary=frame"), (axum::http::header::CACHE_CONTROL, "no-store")], body).into_response()
+}
+
+async fn profile_get() -> impl IntoResponse {
+    Json(ctl::profile())
+}
+
+#[derive(Deserialize)]
+struct ProfileSet {
+    profile: String,
+}
+
+async fn profile_post(headers: HeaderMap, Json(p): Json<ProfileSet>) -> Response {
+    match ctl::set_profile(&p.profile, privileged::password_from(&headers)).await {
+        ctl::Priv::Done => StatusCode::NO_CONTENT.into_response(),
+        ctl::Priv::NeedsPassword => (StatusCode::FORBIDDEN, Json(json!({"error": "password_required"}))).into_response(),
+        ctl::Priv::WrongPassword => (StatusCode::FORBIDDEN, Json(json!({"error": "wrong_password"}))).into_response(),
+        ctl::Priv::Failed => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn macs_get() -> impl IntoResponse {
+    Json(ctl::macs())
+}
+
+#[derive(Deserialize)]
+struct WakeReq {
+    mac: String,
+}
+
+async fn wake_post(Json(w): Json<WakeReq>) -> StatusCode {
+    status(ctl::wake(&w.mac).await)
+}
+
+async fn tailscale_get() -> impl IntoResponse {
+    Json(ctl::tailscale_peers().await)
 }
 
 async fn cam_post(Path(n): Path<u8>, Json(c): Json<CamSet>) -> StatusCode {
@@ -934,7 +993,9 @@ async fn main() {
         .route("/mixer/{kind}/{id}", post(mixer_post))
         .route("/bluetooth", get(bt_get))
         .route("/bluetooth/power", post(bt_power))
+        .route("/bluetooth/scan", get(bt_scan))
         .route("/bluetooth/{mac}/{action}", post(bt_link))
+        .route("/ethernet", get(ethernet_get))
         .route("/wifi", get(wifi_get))
         .route("/wifi/power", post(wifi_power))
         .route("/radios", get(radios_get))
@@ -951,6 +1012,12 @@ async fn main() {
         .route("/clipboard/history/{id}", get(clip_item).delete(clip_item_forget))
         .route("/clipboard/history/{id}/use", post(clip_item_use))
         .route("/webcam/{n}", get(cam_get).post(cam_post))
+        .route("/webcam/{n}/frame", get(cam_frame))
+        .route("/webcam/{n}/stream", get(cam_stream))
+        .route("/profile", get(profile_get).post(profile_post))
+        .route("/macs", get(macs_get))
+        .route("/wake", post(wake_post))
+        .route("/tailscale", get(tailscale_get))
         .route("/power/{action}", post(power_post))
         .route("/procs", get(procs))
         .route("/procs/{pid}/{sig}", post(proc_signal))

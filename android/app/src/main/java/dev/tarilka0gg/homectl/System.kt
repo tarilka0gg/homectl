@@ -29,9 +29,8 @@ fun SystemScreen(onAddMachine: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val m = Hc.cur
-    var confirm by remember { mutableStateOf<Pair<String, String>?>(null) }
 
-    Section("Settings") {
+    Section("App") {
         val appVersion = remember { runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrDefault("?") }
         Text("homectl app $appVersion" + (m?.daemonVersion?.takeIf { it.isNotBlank() }?.let { " · daemon on ${m.name} $it" } ?: ""), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
@@ -76,102 +75,9 @@ fun SystemScreen(onAddMachine: () -> Unit) {
         }
     }
 
-    if (m != null) SecuritySection(m)
+    TunnelSection()
     if (m != null) Section("Connection") { ConnectionTest(m) }
-
-    var modesNonce by remember { mutableIntStateOf(0) }
-    val modes = loaded(modesNonce, 6000, "sys-modes") { Hc.array("/api/actions") }
-    var modeConfirm by remember { mutableStateOf<Triple<JSONObject, Boolean, String>?>(null) }
-    var modeResult by remember { mutableStateOf<Pair<String, JSONObject>?>(null) }
-    var modeBusy by remember { mutableStateOf(setOf<String>()) }
-    fun runMode(a: JSONObject, on: Boolean) {
-        val id = a.str("id")
-        modeBusy = modeBusy + id
-        scope.launch {
-            val (code, j) = Hc.cur?.privPost("/api/actions/$id/${if (on) "on" else "off"}", JSONObject(), 200_000) ?: (0 to null)
-            modeBusy = modeBusy - id
-            modesNonce++
-            when {
-                code == 200 && j?.optBoolean("ok") == true -> Toast.makeText(ctx, "${a.str("title")}: ${if (on) "on" else "off"}", Toast.LENGTH_SHORT).show()
-                j != null -> modeResult = a.str("title") to j
-                else -> Toast.makeText(ctx, "Couldn't reach the machine", Toast.LENGTH_LONG).show()
-            }
-        }
-    }
-    fun requestMode(a: JSONObject, on: Boolean) {
-        val warn = (if (on) a.str("confirm_on") else a.str("confirm_off")).trim()
-        if (warn.isNotEmpty()) modeConfirm = Triple(a, on, warn) else runMode(a, on)
-    }
-    val modeList = modes.value?.objs().orEmpty()
-    if (modeList.isNotEmpty()) Section("Power modes") {
-        modeList.forEach { a ->
-            val id = a.str("id")
-            val busy = id in modeBusy || a.optBoolean("running")
-            val sub = listOf(a.str("desc"), if (a.optBoolean("assumed")) "state assumed from last use" else "").filter { it.isNotBlank() }.joinToString("\n")
-            if (!a.isNull("state")) {
-                SwitchRow(a.str("title"), a.optBoolean("state"), sub.ifBlank { null }, enabled = !busy) { on -> requestMode(a, on) }
-            } else {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(a.str("title"), style = MaterialTheme.typography.bodyLarge)
-                    if (sub.isNotBlank()) Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilledTonalButton({ requestMode(a, true) }, enabled = !busy) { Text("Turn on") }
-                        OutlinedButton({ requestMode(a, false) }, enabled = !busy) { Text("Turn off") }
-                    }
-                }
-            }
-            if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-        }
-        Text("Scripts named <name>-on.sh / <name>-off.sh in your home, ~/.local/bin or /usr/local/bin show up here automatically; they run through doas. More can be defined in ~/.config/homectl/actions.json.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-    modeConfirm?.let { (a, on, warn) ->
-        AlertDialog(
-            onDismissRequest = { modeConfirm = null },
-            title = { Text("${if (on) "Turn on" else "Turn off"} ${a.str("title")}?") },
-            text = { Text(warn) },
-            confirmButton = { TextButton({ modeConfirm = null; runMode(a, on) }) { Text(if (on) "Turn on" else "Turn off") } },
-            dismissButton = { TextButton({ modeConfirm = null }) { Text("Cancel") } },
-        )
-    }
-    modeResult?.let { (title, j) ->
-        AlertDialog(
-            onDismissRequest = { modeResult = null },
-            title = { Text("$title failed") },
-            text = {
-                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (j.str("hint").isNotBlank()) Text(j.str("hint"), style = MaterialTheme.typography.bodyMedium, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
-                    val o = j.str("output").trim().ifBlank { j.str("error") }
-                    if (o.isNotBlank()) Text(o, style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
-                    Text("exit code ${j.optInt("code")}", style = MaterialTheme.typography.labelSmall)
-                }
-            },
-            confirmButton = { TextButton({ modeResult = null }) { Text("Close") } },
-            dismissButton = {
-                if (j.str("hint").isNotBlank()) TextButton({
-                    (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("doas rule", j.str("hint").substringAfter('\n')))
-                    Toast.makeText(ctx, "Rule copied", Toast.LENGTH_SHORT).show()
-                }) { Text("Copy rule") }
-            },
-        )
-    }
-
-    Section("Power — ${m?.name ?: ""}") {
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilledTonalButton({ scope.launch { Hc.post("/api/power/lock") } }) { Text("Lock") }
-            FilledTonalButton({ confirm = "suspend" to "Suspend" }) { Text("Suspend") }
-            FilledTonalButton({ confirm = "reboot" to "Restart" }) { Text("Restart") }
-            Button({ confirm = "poweroff" to "Power off" }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Power off") }
-        }
-    }
-    confirm?.let { (action, label) ->
-        AlertDialog(
-            onDismissRequest = { confirm = null },
-            title = { Text("$label ${m?.name}?") },
-            text = { Text(if (action == "poweroff") "You can't turn it back on from here." else "The machine will be unreachable for a moment.") },
-            confirmButton = { TextButton({ scope.launch { Hc.cur?.privPost("/api/power/$action") }; confirm = null }) { Text(label) } },
-            dismissButton = { TextButton({ confirm = null }) { Text("Cancel") } },
-        )
-    }
+    if (m != null) SecuritySection(m)
 
     var nonce by remember { mutableIntStateOf(0) }
     // the list is only replaced when it changed, so a refresh that found nothing new does not redraw every row
@@ -276,19 +182,6 @@ fun SystemScreen(onAddMachine: () -> Unit) {
         Button({ picker.launch("*/*") }) { Text("Choose files") }
     }
 
-    Section("Machines") {
-        Hc.machines.forEach { mm ->
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(mm.name, style = MaterialTheme.typography.bodyLarge)
-                    Text(if (mm.offline) "offline" else mm.active?.let { "${it.kind} · ${it.url}" } ?: "not checked", style = MaterialTheme.typography.bodySmall,
-                        color = if (mm.offline) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                TextButton({ Hc.remove(mm) }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
-            }
-        }
-        Button(onAddMachine) { Text("Add machine") }
-    }
 }
 
 
@@ -377,6 +270,22 @@ private fun SecuritySection(m: Machine) {
                 }
             }, enabled = !testing) { Text("Test root access") }
             if (saved) OutlinedButton({ Hc.forgetPassword(m); nonce++ }) { Text("Forget password") }
+        }
+    }
+}
+
+
+/** The public tunnel of the selected machine: a way in from outside the home network. */
+@Composable
+private fun TunnelSection() {
+    val scope = rememberCoroutineScope()
+    var nonce by remember { mutableIntStateOf(0) }
+    val tunnel = loaded(nonce, 6000, "ctl-tunnel") { Hc.json("/api/tunnel") }
+    tunnel.value?.let { t ->
+        Section("Remote access") {
+            SwitchRow("Public tunnel", t.optBoolean("on"), if (!t.optBoolean("available")) "cloudflared is not installed on this machine" else t.str("url").ifBlank { if (t.optBoolean("auto") && t.opt("hub_up") == true) "off — your server reaches this machine; it starts by itself if the server stops answering" else "off" }, enabled = t.optBoolean("available")) { on ->
+                scope.launch { Hc.post("/api/tunnel", body("on" to on)); delay(3000); nonce++ }
+            }
         }
     }
 }

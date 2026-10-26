@@ -7,6 +7,7 @@ import android.content.Context
 import android.os.Build
 import android.widget.Toast
 import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -16,6 +17,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -28,6 +30,8 @@ private enum class Tab(val label: String, val icon: ImageVector) {
     Monitor("Monitor", Icons.Default.Info),
     Controls("Controls", Icons.Default.Settings),
     Terminal("Terminal", Icons.Default.PlayArrow),
+    Network("Network", Icons.Default.Share),
+    Devices("Devices", Icons.Default.Home),
     Windows("Windows", WindowsIcon),
     Files("Files", Icons.Default.Menu),
     System("System", Icons.Default.Build),
@@ -60,16 +64,24 @@ fun App() {
     val ctxApp = LocalContext.current
     LaunchedEffect(Unit) { PhoneClips.listen(ctxApp) }
     LaunchedEffect(Unit) { ClipService.ensure(ctxApp) }
+    LaunchedEffect(Hc.machines.map { it.offline }) { learnMacs() }
     LaunchedEffect(Hc.openPath) { if (Hc.openPath != null) { tab = Tab.Files; Hc.memPutStr("tab.name", Tab.Files.name) } }
 
+    // the tab names show for five seconds after the menu button is pressed, then slide away again
+    var labelsShown by remember { mutableStateOf(false) }
+    var labelRound by remember { mutableIntStateOf(0) }
+    // every change of labelRound restarts (or cancels) the countdown; the menu button changes it
+    LaunchedEffect(labelRound) { if (labelsShown) { delay(5000); labelsShown = false } }
+
     Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            TopAppBar(
-                title = {
+            Row(Modifier.fillMaxWidth().statusBarsPadding().height(32.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Box {
-                        TextButton({ menu = true }) {
-                            Text(m.name.ifBlank { "homectl" }, style = MaterialTheme.typography.titleLarge)
-                            Icon(Icons.Default.ArrowDropDown, null)
+                        // a plain row, not a text button: the button's 40 dp minimum height would cut the name in the 32 dp bar
+                        Row(Modifier.height(32.dp).clickable { menu = true }.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(m.name.ifBlank { "homectl" }, style = MaterialTheme.typography.titleSmall)
+                            Icon(Icons.Default.ArrowDropDown, null, Modifier.size(20.dp))
                         }
                         DropdownMenu(menu, { menu = false }) {
                             Hc.machines.forEach {
@@ -79,18 +91,17 @@ fun App() {
                             DropdownMenuItem(text = { Text("Add machine…") }, leadingIcon = { Icon(Icons.Default.Add, null) }, onClick = { menu = false; adding = true })
                         }
                     }
-                },
-                actions = {
-                    AssistChip(
+                Spacer(Modifier.weight(1f))
+                AssistChip(
+                    modifier = Modifier.height(24.dp),
                         onClick = {},
-                        label = { Text(if (m.certProblem) "certificate!" else if (m.offline) "offline" else if (m.authProblem != null) "not registered" else (m.active?.kind ?: "connecting…") + if (m.active?.let { m.pinFor(it) } != null) " 🔒" else "") },
+                        label = { Text(style = MaterialTheme.typography.labelSmall, text = if (m.certProblem) "certificate!" else if (m.offline) "offline" else if (m.authProblem != null) "not registered" else (m.active?.kind ?: "connecting…") + if (m.active?.let { m.pinFor(it) } != null) " 🔒" else "") },
                         colors = AssistChipDefaults.assistChipColors(
                             containerColor = if (m.offline) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer,
                         ),
                     )
-                    Spacer(Modifier.width(12.dp))
-                },
-            )
+                Spacer(Modifier.width(8.dp))
+            }
         },
         bottomBar = {
             androidx.compose.animation.AnimatedVisibility(
@@ -98,9 +109,33 @@ fun App() {
                 enter = androidx.compose.animation.slideInVertically(androidx.compose.animation.core.tween(240)) { it } + androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(240)),
                 exit = androidx.compose.animation.slideOutVertically(androidx.compose.animation.core.tween(240)) { it } + androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(240)),
             ) {
-                NavigationBar {
-                    Tab.entries.forEach {
-                        NavigationBarItem(selected = tab == it, onClick = { tab = it; Hc.memPutStr("tab.name", it.name) }, icon = { Icon(it.icon, it.label) }, label = { Text(it.label, maxLines = 1) })
+                Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
+                    Column(Modifier.fillMaxWidth().navigationBarsPadding()) {
+                        Row(Modifier.fillMaxWidth().height(36.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Tab.entries.forEach {
+                                val tint = if (tab == it) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                Box(Modifier.weight(1f).fillMaxHeight().clickable { tab = it; Hc.memPutStr("tab.name", it.name) }, contentAlignment = Alignment.Center) {
+                                    Icon(it.icon, it.label, Modifier.size(24.dp), tint = tint)
+                                }
+                            }
+                            IconButton(onClick = { labelsShown = !labelsShown; labelRound++ }) { Icon(Icons.Default.Menu, "Show or hide tab names") }
+                        }
+                        androidx.compose.animation.AnimatedVisibility(
+                            labelsShown,
+                            enter = androidx.compose.animation.expandVertically(expandFrom = Alignment.Top) + androidx.compose.animation.slideInVertically { -it } + androidx.compose.animation.fadeIn(),
+                            exit = androidx.compose.animation.shrinkVertically(shrinkTowards = Alignment.Top) + androidx.compose.animation.slideOutVertically { -it } + androidx.compose.animation.fadeOut(),
+                        ) {
+                            // the names sit under their icons, centred on them; the spacer lines up with the menu button
+                            Row(Modifier.fillMaxWidth().clipToBounds().padding(bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Tab.entries.forEach {
+                                    Text(it.label, Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false,
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                        color = if (tab == it) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                Text("Menu", Modifier.width(48.dp), style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
                     }
                 }
             }
@@ -109,12 +144,14 @@ fun App() {
         if (tab == Tab.Terminal || tab == Tab.Files || tab == Tab.Windows) {
             Box(Modifier.padding(pad).fillMaxSize()) { when (tab) { Tab.Terminal -> TerminalScreen(); Tab.Windows -> WindowsScreen(); else -> FilesScreen() } }
         } else {
-            Column(Modifier.padding(pad).fillMaxSize().verticalScroll(scrolls.getValue(tab)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.padding(pad).fillMaxSize().verticalScroll(scrolls.getValue(tab)).padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 when (tab) {
                     Tab.Monitor -> MonitorScreen()
                     Tab.Controls -> ControlsScreen()
                     Tab.Files -> {}
                     Tab.System -> SystemScreen { adding = true }
+                    Tab.Network -> NetworkScreen()
+                    Tab.Devices -> DevicesScreen { adding = true }
                     Tab.Terminal, Tab.Windows -> {}
                 }
             }

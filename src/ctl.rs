@@ -399,3 +399,168 @@ pub async fn radios() -> Value {
     let bt = run("bluetoothctl", &["show"]).await.is_some_and(|s| s.contains("Powered: yes"));
     json!({"wifi": wifi, "bluetooth": bt})
 }
+
+// ---- Tailscale (the `tailscale` CLI; devices of this tailnet) ----
+/// The machines of this tailnet, this one excluded: name, address, whether it is online, and its system.
+pub async fn tailscale_peers() -> Value {
+    let Some(text) = run("tailscale", &["status", "--json"]).await else {
+        return json!({ "available": false, "peers": [] });
+    };
+    let v: Value = serde_json::from_str(&text).unwrap_or_default();
+    let mut peers: Vec<Value> = v["Peer"]
+        .as_object()
+        .into_iter()
+        .flat_map(|m| m.values())
+        .map(|p| {
+            json!({
+                "name": p["HostName"].as_str().unwrap_or(""),
+                "dns": p["DNSName"].as_str().unwrap_or("").trim_end_matches('.'),
+                "ip": p["TailscaleIPs"][0].as_str().unwrap_or(""),
+                "online": p["Online"].as_bool().unwrap_or(false),
+                "os": p["OS"].as_str().unwrap_or(""),
+            })
+        })
+        .collect();
+    peers.sort_by(|a, b| b["online"].as_bool().cmp(&a["online"].as_bool()).then_with(|| a["name"].as_str().cmp(&b["name"].as_str())));
+    json!({ "available": true, "state": v["BackendState"].as_str().unwrap_or(""), "peers": peers })
+}
+
+// ---- webcam preview (one frame, as JPEG) ----
+/// One frame of webcam `n`, scaled down so it is quick to send to the phone. None if there is no such camera or no frame.
+pub async fn webcam_frame(n: u8) -> Option<Vec<u8>> {
+    let dev = format!("/dev/video{n}");
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-f", "v4l2", "-i", &dev, "-frames:v", "1", "-vf", "scale=640:-2", "-f", "image2", "-c:v", "mjpeg", "-"])
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    (out.status.success() && out.stdout.len() > 100).then_some(out.stdout)
+}
+
+// ---- Bluetooth scan and pairing ----
+/// Scans for nearby devices for eight seconds, then returns the list (what was seen or paired before).
+pub async fn bluetooth_scan() -> Value {
+    let _ = Command::new("bluetoothctl").args(["--timeout", "8", "scan", "on"]).output().await;
+    bluetooth().await
+}
+
+/// Pairs with a device, trusts it and connects. Each step must succeed.
+pub async fn bluetooth_pair(mac: &str) -> bool {
+    valid_name(mac)
+        && ok("bluetoothctl", &["pair", mac]).await
+        && ok("bluetoothctl", &["trust", mac]).await
+        && ok("bluetoothctl", &["connect", mac]).await
+}
+
+// ---- wired network (NetworkManager) ----
+/// The wired connections: device, state, and the connection name.
+pub async fn ethernet() -> Value {
+    let out = run("nmcli", &["-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device"]).await.unwrap_or_default();
+    let list: Vec<Value> = out
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.splitn(4, ':').collect();
+            (f.len() == 4 && f[1] == "ethernet").then(|| json!({ "device": f[0], "state": f[2], "connection": f[3] }))
+        })
+        .collect();
+    json!(list)
+}
+
+// ---- ACPI platform profile (low-power / balanced / performance) ----
+const PROFILE: &str = "/sys/firmware/acpi/platform_profile";
+
+/// The firmware's power profile: what it is now and what it offers. `available: false` on machines without one.
+pub fn profile() -> Value {
+    let cur = std::fs::read_to_string(PROFILE).map(|s| s.trim().to_string());
+    let choices = std::fs::read_to_string(format!("{PROFILE}_choices")).unwrap_or_default();
+    match cur {
+        Ok(cur) => json!({ "available": true, "current": cur, "choices": choices.split_whitespace().collect::<Vec<_>>() }),
+        Err(_) => json!({ "available": false }),
+    }
+}
+
+/// Writes the profile: directly when the file is writable (root), otherwise through doas (a nopass rule, or the password the app sends).
+pub async fn set_profile(name: &str, password: Option<String>) -> Priv {
+    let choices = std::fs::read_to_string(format!("{PROFILE}_choices")).unwrap_or_default();
+    if !choices.split_whitespace().any(|c| c == name) {
+        return Priv::Failed;
+    }
+    if std::fs::write(PROFILE, name).is_ok() {
+        return Priv::Done;
+    }
+    let script = format!("echo {name} > {PROFILE}");
+    match password {
+        None => match Command::new("doas").args(["-n", "sh", "-c", &script]).output().await {
+            Ok(o) if o.status.success() => Priv::Done,
+            Ok(o) if crate::privileged::says_required(&String::from_utf8_lossy(&o.stderr)) => Priv::NeedsPassword,
+            _ => Priv::Failed,
+        },
+        Some(pw) => {
+            let args = vec!["sh".to_string(), "-c".to_string(), script];
+            match tokio::task::spawn_blocking(move || crate::privileged::doas(args, &pw, std::time::Duration::from_secs(30))).await {
+                Ok(Ok(o)) if o.code == 0 => Priv::Done,
+                Ok(Ok(o)) if o.wrong_password() => Priv::WrongPassword,
+                _ => Priv::Failed,
+            }
+        }
+    }
+}
+
+// ---- Wake-on-LAN ----
+/// The hardware addresses of this machine's real network cards (Ethernet and Wi-Fi), so the phone can wake it later.
+pub fn macs() -> Value {
+    let mut out = vec![];
+    if let Ok(rd) = std::fs::read_dir("/sys/class/net") {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let p = e.path();
+            if !p.join("device").exists() {
+                continue; // virtual: lo, bridges, tunnels, veth
+            }
+            if let Ok(m) = std::fs::read_to_string(p.join("address")) {
+                let m = m.trim().to_string();
+                if m.len() == 17 && m != "00:00:00:00:00:00" {
+                    out.push(json!({ "device": name, "mac": m, "wireless": p.join("wireless").exists() }));
+                }
+            }
+        }
+    }
+    json!(out)
+}
+
+/// Sends a Wake-on-LAN magic packet (6 x 0xFF, then the address 16 times) to the LAN's broadcast address.
+pub async fn wake(mac: &str) -> bool {
+    let bytes: Vec<u8> = mac.split(':').filter_map(|h| u8::from_str_radix(h, 16).ok()).collect();
+    if bytes.len() != 6 {
+        return false;
+    }
+    let mut pkt = vec![0xffu8; 6];
+    for _ in 0..16 {
+        pkt.extend_from_slice(&bytes);
+    }
+    let Ok(sock) = tokio::net::UdpSocket::bind("0.0.0.0:0").await else { return false };
+    if sock.set_broadcast(true).is_err() {
+        return false;
+    }
+    let mut sent = false;
+    for port in [9u16, 7] {
+        sent |= sock.send_to(&pkt, ("255.255.255.255", port)).await.is_ok();
+    }
+    sent
+}
+
+// ---- live webcam (MJPEG) ----
+/// ffmpeg writing a motion-JPEG stream to its stdout, until it is dropped. The caller frames it as multipart/x-mixed-replace.
+pub fn webcam_stream(n: u8) -> Option<tokio::process::Child> {
+    Command::new("ffmpeg")
+        .args(["-loglevel", "error", "-f", "v4l2", "-framerate", "15", "-i", &format!("/dev/video{n}"), "-vf", "scale=640:-2", "-q:v", "7", "-f", "mpjpeg", "-boundary_tag", "frame", "-"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .ok()
+}

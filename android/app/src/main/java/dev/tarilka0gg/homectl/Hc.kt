@@ -741,6 +741,8 @@ object Hc {
     // The screens talk to the selected machine.
     suspend fun json(path: String) = cur?.json(path)
     suspend fun array(path: String) = cur?.array(path)
+    suspend fun bytes(path: String) = cur?.bytes(path)
+    suspend fun getSlow(pathQuery: String, readTimeoutMs: Int = 120_000) = cur?.getSlow(pathQuery, readTimeoutMs)
     suspend fun post(path: String, body: JSONObject = JSONObject()) = cur?.post(path, body) ?: false
     suspend fun upload(ctx: Context, uri: Uri, fileName: String) = cur?.upload(ctx, uri, fileName) ?: false
 }

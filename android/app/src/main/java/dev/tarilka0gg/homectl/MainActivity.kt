@@ -5,6 +5,7 @@ import android.os.Build
 import android.os.Bundle
 import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
@@ -17,6 +18,8 @@ import androidx.compose.ui.platform.LocalContext
 class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // draw behind the status and navigation bars; the top and bottom bars of the screens pad themselves for them
+        enableEdgeToEdge()
         Hc.init(this)
         Hc.activity = this
         applyScreenshotBlock()
