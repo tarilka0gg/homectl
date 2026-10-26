@@ -65,11 +65,16 @@ fun DisksSection(d: JSONObject, hist: HistView) {
     if (devs.isNotEmpty()) Section("Disk activity by process", trailing = {
         Text(if (d.str("disk_procs_scope") == "all") "all users" else "this user only", style = MaterialTheme.typography.labelSmall)
     }) {
-        if (procs.isEmpty()) Text("Nothing is reading or writing right now.", style = MaterialTheme.typography.bodyMedium)
-        procs.forEach { p ->
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("${p.str("name")}  ${p.optInt("pid")}", style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                Text("R ${fmtRate(p.optDouble("read_bps"))}  W ${fmtRate(p.optDouble("write_bps"))}", style = MaterialTheme.typography.labelMedium, fontFamily = FontFamily.Monospace)
+        // the number of rows changes every second; a height that never shrinks keeps what is below (the process list) where it is
+        Column(Modifier.fillMaxWidth().keepMaxHeight()) {
+            if (procs.isEmpty()) Text("Nothing is reading or writing right now.", style = MaterialTheme.typography.bodyMedium)
+            procs.forEach { p ->
+                key(p.optInt("pid")) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("${p.str("name")}  ${p.optInt("pid")}", style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        Text("R ${fmtRate(p.optDouble("read_bps"))}  W ${fmtRate(p.optDouble("write_bps"))}", style = MaterialTheme.typography.labelMedium, fontFamily = FontFamily.Monospace)
+                    }
+                }
             }
         }
     }

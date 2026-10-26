@@ -8,6 +8,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -70,6 +71,17 @@ fun SliderRow(label: String, value: Float, max: Float = 100f, min: Float = 0f, e
         }
         Slider(v, { dragging = true; v = it }, enabled = enabled, valueRange = min..max, onValueChangeFinished = { dragging = false; onDone(v.toInt()) })
     }
+}
+
+/**
+ * A block whose height only ever grows while it is on screen. Things above the part you are looking at that come and go between
+ * refreshes (a list of 0-8 rows, a "nothing to show" line) would otherwise push everything below them up and down every second.
+ */
+@Composable
+fun Modifier.keepMaxHeight(): Modifier {
+    var max by remember { mutableIntStateOf(0) }
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    return this.heightIn(min = with(density) { max.toDp() }).onSizeChanged { if (it.height > max) max = it.height }
 }
 
 /**

@@ -325,7 +325,7 @@ private fun Processes(count: Int, scope: CoroutineScope) {
             H("MEM", "mem", Modifier.width(78.dp))
         }
         val procs = res.value?.optJSONArray("procs")?.objs().orEmpty()
-        procs.forEach { p ->
+        procs.forEach { p -> key(p.getInt("pid")) {
             Row(Modifier.fillMaxWidth().clickable { selected = p }.padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("${p.getInt("pid")}", Modifier.width(80.dp), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
                 Column(Modifier.weight(1f)) {
@@ -335,7 +335,7 @@ private fun Processes(count: Int, scope: CoroutineScope) {
                 Text("%.1f".format(p.getDouble("cpu")), Modifier.width(64.dp), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, color = heat(p.getDouble("cpu").toFloat().coerceAtMost(100f)))
                 Text(fmtBytes(p.getDouble("mem")), Modifier.width(78.dp), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
             }
-        }
+        } }
         val matched = res.value?.optInt("matched") ?: 0
         if (procs.size < matched) OutlinedButton({ limit += 60 }) { Text("Show more (${procs.size} of $matched)") }
     }

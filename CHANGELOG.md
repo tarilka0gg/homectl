@@ -6,6 +6,7 @@ All notable changes to homectl, newest first. The format follows [Keep a Changel
 ## [Unreleased]
 
 ### Fixed
+- **The Monitor page no longer shifts under your finger while it refreshes.** The "Disk activity by process" card, just above the process list, shows 0 to 8 rows depending on what is writing to disk at that moment, so its height changed every second and pushed everything below it up and down (the process list moved by up to 222 px between refreshes, measured in the emulator with bursts of disk writes). That card now keeps the largest height it has had while you are on the page, and the process rows are keyed by PID so they are moved rather than redrawn in place. With the fix the list's header stayed at exactly one position through the same test.
 - **Switches no longer stay in the wrong position.** A switch flips the moment you tap it and is corrected by the next refresh, but the correction only came when the real state *changed*: if a service refused to start, a root-password prompt was cancelled, or the machine said no, the switch kept showing the new position until you left the page (checked in the emulator: still "on" 8 seconds after cancelling the prompt). It now goes back to what the machine reports after a few seconds. This applies to every switch in the app (services, lights, tunnel, security).
 - **The services list redraws only when it changed.** A refresh used to replace the list and redraw all 56 rows every 6 seconds even when nothing was different; rows are now keyed by service name and an unchanged list is left alone.
 
