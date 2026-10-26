@@ -680,7 +680,9 @@ object Hc {
      * the server. Switched off per machine by pressing Unlink in System → Reach … through a server.
      */
     suspend fun autoLinkAll() {
-        for (h in machines.toList()) if (h.active != null && h.active?.kind != "server") autoLink(h)
+        // a machine that is itself reached through a server is never made a server in turn (two machines relaying through each
+        // other would also keep each other's tunnels running)
+        for (h in machines.toList()) if (h.active != null && h.active?.kind != "server" && h.endpoints.none { it.kind == "server" }) autoLink(h)
     }
 
     suspend fun autoLink(hub: Machine) {

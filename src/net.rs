@@ -15,11 +15,17 @@ pub fn spawn_tunnel(port: u16, url: TunnelUrl, token: String) -> tokio::task::Jo
     tokio::spawn(async move {
         let bin = std::env::var("HOMECTL_CLOUDFLARED").unwrap_or_else(|_| "cloudflared".into());
         loop {
-            let child = Command::new(&bin)
-                .args(["tunnel", "--no-autoupdate", "--url", &format!("http://127.0.0.1:{port}")])
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true)
-                .spawn();
+            let mut cmd = Command::new(&bin);
+            cmd.args(["tunnel", "--no-autoupdate", "--url", &format!("http://127.0.0.1:{port}")]).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+            // the tunnel must not outlive the daemon: kill_on_drop does nothing when the daemon is stopped by a signal, which left an
+            // orphaned cloudflared (35-50 MB) behind on every restart, and a second tunnel next to the new one
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                    Ok(())
+                });
+            }
+            let child = cmd.spawn();
             match child {
                 Ok(mut c) => {
                     let mut lines = BufReader::new(c.stderr.take().unwrap()).lines();
