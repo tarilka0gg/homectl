@@ -3,6 +3,24 @@
 All notable changes to homectl, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/), with
 `## [version] - date` headings. The app and the daemon share one version number.
 
+## [0.20.0] - 2026-10-26
+
+### Changed
+- **The app's tabs are regrouped by what they control, and every switch sits with the thing it switches.**
+  - *Controls*: sound (outputs, inputs, apps) and the webcam, with its picture and its settings in one card.
+  - *Devices*: Power, Screens, Machines, Lights and the Tailscale devices.
+  - *Network*: Airplane mode, Wi-Fi with its networks, Ethernet, Bluetooth with its devices. The switch is in the card's title row, so a name is no longer shown twice.
+  - *System*: the app, reaching a machine through a server, remote access (the public tunnel moved here from Controls), the connection test, security, services, clipboard and sending files.
+  - The Power card holds the performance profile, the power scripts and Lock, Sleep, Restart and Power off for the selected machine; each other machine has its own Sleep, Restart and Power off in Machines.
+
+### Added
+- **Performance profile.** The firmware's ACPI platform profile (power saver, balanced, performance) can be read and changed from the app (`GET`/`POST /api/profile`). Changing it needs root; the daemon writes it directly when it can and otherwise asks for the doas password like the other power actions.
+- **Wake up.** An offline machine gets a Wake up button. The phone learns each machine's network card addresses while it is online (`GET /api/macs`) and later sends the Wake-on-LAN packet itself and through every other online machine (`POST /api/wake`). It needs Wake-on-LAN enabled in the machine's firmware and card.
+- **Live webcam.** Live is now a motion-JPEG video stream of about 15 frames a second (`GET /api/webcam/{n}/stream`) instead of one picture after another; the camera is released as soon as the phone stops watching.
+
+### Notes
+- The app tolerates an older daemon: Live, the performance profile and Wake up need this version on the machine, the rest works as before.
+
 ## [0.19.3] - 2026-10-26
 
 ### Added
