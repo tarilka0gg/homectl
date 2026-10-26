@@ -313,7 +313,7 @@ struct Kid {
 
 /// Disk usage of each direct child of [`root`], walking all folders on many threads (like `dust`),
 /// staying on one filesystem. Gives up after `limit` and reports what it has so far.
-fn scan(root: &std::path::Path, limit: std::time::Duration) -> Option<serde_json::Value> {
+fn walk(root: &std::path::Path, limit: std::time::Duration) -> Option<serde_json::Value> {
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed},
         Condvar, Mutex,
@@ -380,6 +380,34 @@ fn scan(root: &std::path::Path, limit: std::time::Duration) -> Option<serde_json
     let total: u64 = rows.iter().map(|r| r.0).sum();
     let entries: Vec<_> = rows.into_iter().take(80).map(|(size, k)| json!({"name": k.name, "path": k.path.display().to_string(), "dir": k.dir, "size": size})).collect();
     Some(json!({"path": root.display().to_string(), "entries": entries, "total": total, "partial": timed_out.load(Relaxed), "ms": started.elapsed().as_millis() as u64}))
+}
+
+/// Runs the walk in a short-lived child process of this same binary and returns its result. A walk of a big folder makes many
+/// threads allocate millions of small paths, and the allocator keeps that memory after the walk (the daemon grew by 10-35 MB with
+/// every scan of a large folder); a process that exits gives all of it back. Blocking: call it from `spawn_blocking`.
+fn scan(root: &std::path::Path, limit: std::time::Duration) -> Option<serde_json::Value> {
+    use std::process::{Command, Stdio};
+    // /proc/self/exe keeps working after the binary on disk has been replaced by an update
+    let out = Command::new("/proc/self/exe")
+        .arg("scan-usage")
+        .arg(root)
+        .arg(limit.as_secs().to_string())
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    match serde_json::from_slice(&out.stdout) {
+        Ok(v) => v,
+        // the child could not start or died: fall back to walking in this process
+        Err(_) => walk(root, limit),
+    }
+}
+
+/// `homectl scan-usage <path> <seconds>`: prints the result of [`walk`] as JSON (or `null`) and exits.
+pub fn scan_usage_main(args: &[String]) {
+    let root = std::path::PathBuf::from(args.first().map_or("/", |s| s.as_str()));
+    let secs = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(120);
+    println!("{}", walk(&root, std::time::Duration::from_secs(secs)).unwrap_or(serde_json::Value::Null));
 }
 
 // ---- scan cache: results survive app restarts and are shared by every client ----

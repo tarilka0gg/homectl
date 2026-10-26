@@ -10,6 +10,8 @@ All notable changes to homectl, newest first. The format follows [Keep a Changel
 
 - **A leaner daemon binary and runtime.** The release build now uses link-time optimisation, optimises for size and strips symbols (the static build is 5.2 MB instead of 8.6 MB), and the async runtime starts 4 worker threads instead of one per CPU core (the daemon ran 26 threads on a 24-core laptop, now 6). With the same workload the daemon settles at about 8.5 MB resident after polling instead of 11.5 to 14 MB, and it levels off under repeated requests (no growth between 60 and 300 polls).
 
+- **Measuring a folder's size no longer makes the daemon grow.** The "what takes space" scan walks a folder on many threads, allocating a path for every directory, and the allocator kept that memory afterwards: one scan of a large folder left the daemon 10 to 35 MB bigger for good, and several scans stacked up. The walk now runs in a short-lived helper process (`homectl scan-usage <path>`) whose memory goes back to the system when it exits; scanning a 760 GB home folder leaves the daemon at 3.8 MB (it grew from 2.9 to 13.9 MB before), and the scan is faster (7.7 s instead of 11.4 s). If the helper cannot start, the scan runs in the daemon as before.
+
 ### Fixed
 - **A restart of the daemon no longer leaves its tunnel process behind.** `cloudflared` is now stopped together with the daemon (it is killed when its parent dies); before, a stopped daemon left an orphaned tunnel running next to the new one (35-50 MB each).
 - **The app never makes a machine that is reached through a server into a server itself.** That could link two machines through each other, which also kept both of their tunnels running.
