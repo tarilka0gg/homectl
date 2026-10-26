@@ -47,6 +47,11 @@ impl Peers {
         }
     }
 
+    /// True when this machine relays for others (it is somebody's server).
+    pub fn any(&self) -> bool {
+        !self.list.read().unwrap().is_empty()
+    }
+
     fn get(&self, id: &str) -> Option<Peer> {
         self.list.read().unwrap().iter().find(|p| p.id == id).cloned()
     }

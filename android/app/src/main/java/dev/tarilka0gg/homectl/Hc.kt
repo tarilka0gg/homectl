@@ -688,7 +688,10 @@ object Hc {
         autoLinking = true
         try {
             for (t in machines.toList()) {
-                if (t.id == hub.id || relayedVia(t, hub) || memBool("autolink.skip.${t.id}.${hub.id}") || "${t.id}>${hub.id}" in autoLinked) continue
+                if (t.id == hub.id || memBool("autolink.skip.${t.id}.${hub.id}")) continue
+                // already linked: only make sure the machine knows its server (so it can keep its own tunnel off while the server is up)
+                if (relayedVia(t, hub)) { if ("${t.id}>${hub.id}#hub" !in autoLinked) { autoLinked.add("${t.id}>${hub.id}#hub"); registerHubs(t, hub) }; continue }
+                if ("${t.id}>${hub.id}" in autoLinked) continue
                 autoLinked.add("${t.id}>${hub.id}")
                 if (!linkViaServer(t, hub)) autoLinked.remove("${t.id}>${hub.id}")
             }
@@ -709,13 +712,25 @@ object Hc {
         target.endpoints = target.endpoints.filter { it.hub != hub.id } + Endpoint("server", "$hubUrl/peer/$peerId", hub.token, hub.id)
         save()
         target.resolve()
+        registerHubs(target, hub)
         return true
+    }
+
+    /**
+     * Tells [target] the server's home-network addresses (LAN, Tailscale) so that, with HOMECTL_TUNNEL=auto, it keeps its own
+     * public tunnel off while the server answers and starts it when the server doesn't. Older daemons just ignore this.
+     */
+    suspend fun registerHubs(target: Machine, hub: Machine) {
+        val urls = hub.endpoints.filter { it.kind == "lan" || it.kind == "tailscale" }.map { it.url }
+        if (urls.isEmpty()) return
+        target.call("POST", "/api/hubs", body("urls" to JSONArray(urls)))
     }
 
     suspend fun unlinkViaServer(target: Machine, hub: Machine) {
         memPutBool("autolink.skip.${target.id}.${hub.id}", true)
         val peerId = target.id.filter { it.isLetterOrDigit() }.take(24)
         hub.call("DELETE", "/api/peers/$peerId")
+        target.call("DELETE", "/api/hubs")
         target.endpoints = target.endpoints.filter { it.hub != hub.id }
         save()
         target.resolve()

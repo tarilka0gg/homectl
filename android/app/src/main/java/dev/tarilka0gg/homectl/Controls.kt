@@ -165,7 +165,7 @@ fun ControlsScreen() {
 
     tunnel.value?.let { t ->
         Section("Remote access") {
-            SwitchRow("Public tunnel", t.optBoolean("on"), if (!t.optBoolean("available")) "cloudflared is not installed on this machine" else t.str("url").ifBlank { "off" }, enabled = t.optBoolean("available")) { on ->
+            SwitchRow("Public tunnel", t.optBoolean("on"), if (!t.optBoolean("available")) "cloudflared is not installed on this machine" else t.str("url").ifBlank { if (t.optBoolean("auto") && t.opt("hub_up") == true) "off — your server reaches this machine; it starts by itself if the server stops answering" else "off" }, enabled = t.optBoolean("available")) { on ->
                 act(3000) { Hc.post("/api/tunnel", body("on" to on)) }
             }
         }

@@ -4,7 +4,11 @@ Order the app tries, per machine (all probed at once, best answer wins):
 
 1. **LAN** — same Wi-Fi, instant.
 2. **Tunnel** — a free Cloudflare *quick tunnel* that the machine opens **outward** (no router settings, works behind carrier-grade
-   NAT). Started by the daemon when `HOMECTL_TUNNEL=quick` (the server's boot service does this by default).
+   NAT). Started by the daemon when `HOMECTL_TUNNEL=quick` (always on) or `auto` (the boot service's default): with `auto`, a
+   machine that a server relays to (route 3) keeps its own tunnel **off** while that server answers and has its tunnel up, starts it
+   after about a minute without an answer, and stops it again after about a minute of the server being back. The app tells each
+   machine its server's LAN/Tailscale address when it links them (`/api/hubs`); a machine with no server, or one that is itself
+   somebody's server, keeps its tunnel on. Switching the tunnel by hand pauses `auto` until the daemon restarts.
 3. **Through another machine** — a machine with a tunnel (the always-on server) relays to your other machines, so the laptop
    works away from home too, as long as the laptop is on and at home. Set up automatically once both are paired.
 4. **Tailscale / Headscale** — last fallback.

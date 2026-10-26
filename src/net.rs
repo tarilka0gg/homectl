@@ -40,6 +40,52 @@ pub fn spawn_tunnel(port: u16, url: TunnelUrl, token: String) -> tokio::task::Jo
     })
 }
 
+// ---- hubs: servers that relay to this machine, so it needs no tunnel of its own while one of them is up ----
+//
+// The app tells a machine which server relays to it (a list of that server's LAN / tailnet addresses, kept in
+// `~/.config/homectl/hubs.json`). With `HOMECTL_TUNNEL=auto` the machine then keeps its own tunnel off while a hub answers and
+// has a tunnel of its own, and starts it when none does.
+
+fn hubs_file() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config/homectl/hubs.json")
+}
+
+pub fn load_hubs() -> Vec<String> {
+    std::fs::read_to_string(hubs_file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+pub fn save_hubs(list: &[String]) {
+    if list.is_empty() {
+        let _ = std::fs::remove_file(hubs_file());
+        return;
+    }
+    if let Ok(t) = serde_json::to_string_pretty(list) {
+        let f = hubs_file();
+        let _ = std::fs::write(&f, t);
+        let _ = std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+    }
+}
+
+/// Only `http://<private or tailnet IPv4>:<port>`: the daemon fetches these, so nothing else is accepted.
+pub fn valid_hub(u: &str) -> bool {
+    let Some(rest) = u.strip_prefix("http://") else { return false };
+    let Some((host, port)) = rest.split_once(':') else { return false };
+    if port.parse::<u16>().is_err() {
+        return false;
+    }
+    let Ok(ip) = host.parse::<std::net::Ipv4Addr>() else { return false };
+    let o = ip.octets();
+    ip.is_private() || (o[0] == 100 && (64..=127).contains(&o[1]))
+}
+
+/// A hub counts as up when it answers `/api/ping` and does not say its tunnel is down (an older daemon says nothing: assumed up).
+pub async fn hub_ok(url: &str) -> bool {
+    let out = Command::new("curl").args(["-s", "-m", "3", &format!("{url}/api/ping")]).stderr(std::process::Stdio::null()).output().await;
+    let Ok(o) = out else { return false };
+    let Ok(v) = serde_json::from_slice::<Value>(&o.stdout) else { return false };
+    v["homectl"] == 1 && v["tunnel"] != false
+}
+
 pub async fn tunnel_available() -> bool {
     let bin = std::env::var("HOMECTL_CLOUDFLARED").unwrap_or_else(|_| "cloudflared".into());
     Command::new(bin).arg("--version").output().await.is_ok_and(|o| o.status.success())
@@ -191,6 +237,19 @@ fn announce_loop(url: TunnelUrl, token: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_private_and_tailnet_addresses_are_accepted_as_hubs() {
+        assert!(valid_hub("http://192.168.1.66:7878"));
+        assert!(valid_hub("http://100.64.0.1:7878"));
+        assert!(valid_hub("http://10.0.0.5:7878"));
+        assert!(!valid_hub("http://8.8.8.8:7878"));
+        assert!(!valid_hub("https://192.168.1.66:7878"));
+        assert!(!valid_hub("http://192.168.1.66"));
+        assert!(!valid_hub("http://example.com:7878"));
+        assert!(!valid_hub("http://100.200.0.1:7878"));
+        assert!(!valid_hub("http://192.168.1.66:7878/x"));
+    }
 
     #[test]
     fn announcement_signature_matches_the_app_and_depends_on_everything() {

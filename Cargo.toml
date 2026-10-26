@@ -1,6 +1,6 @@
 [package]
 name = "homectl"
-version = "0.19.0"
+version = "0.19.1"
 edition = "2021"
 description = "Control my machines and smart home from one daemon + Android-friendly web UI"
 license = "GPL-2.0-or-later"

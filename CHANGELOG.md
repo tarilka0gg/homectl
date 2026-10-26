@@ -3,6 +3,14 @@
 All notable changes to homectl, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/), with
 `## [version] - date` headings. The app and the daemon share one version number.
 
+## [0.19.1] - 2026-10-26
+
+### Changed
+- **A machine's own tunnel is off while a server reaches it, and starts by itself when the server does not.** Every machine ran its own `cloudflared` (35-50 MB each) even though the always-on server already relays to the others. With `HOMECTL_TUNNEL=auto` (now the boot service's default) a machine that a server is linked to keeps its tunnel off while that server answers and has its tunnel up; after about a minute without an answer it opens its own tunnel, and it closes it again after about a minute of the server being back. A machine with no server linked, or one that is itself somebody's server, keeps its tunnel on as before, and switching the tunnel by hand in Controls pauses the automatic control until the daemon restarts.
+  - The app tells each machine its server's LAN and Tailscale addresses when it links them (`POST /api/hubs`; `GET` and `DELETE` too). Only private and tailnet `http://` addresses are accepted, and a machine that relays for others refuses to have a server of its own.
+  - `/api/ping` now says whether the machine's public tunnel is up (`tunnel`), so a machine relying on it can tell. The tunnel row in Controls says when it is off because the server covers it.
+  - `HOMECTL_TUNNEL=quick` (always on) and `off` work as before. Boot services that set nothing now get `auto`; with no server linked that is the same as `quick`.
+
 ## [0.19.0] - 2026-10-26
 
 ### Added

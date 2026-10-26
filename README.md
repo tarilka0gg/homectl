@@ -76,7 +76,7 @@ The APK is signed with APK Signature Scheme v2 + v3. The certificate fingerprint
 The app keeps every address a machine reports and tries **all of them at once**, taking the best answer:
 
 1. **LAN**: the same Wi-Fi.
-2. **Tunnel**: an outbound Cloudflare quick tunnel the daemon opens (`HOMECTL_TUNNEL=quick`, with `cloudflared` next to the binary or on `PATH`). It needs no router settings and works behind carrier-grade NAT. The tunnel's address changes on every restart, so the daemon announces it on a private [ntfy](https://ntfy.sh) topic, signed with the machine's token, and the app finds it there.
+2. **Tunnel**: an outbound Cloudflare quick tunnel the daemon opens (`HOMECTL_TUNNEL=quick`, or `auto` to keep it off while a server that relays to the machine is up; needs `cloudflared` next to the binary or on `PATH`). It needs no router settings and works behind carrier-grade NAT. The tunnel's address changes on every restart, so the daemon announces it on a private [ntfy](https://ntfy.sh) topic, signed with the machine's token, and the app finds it there.
 3. **Through another machine**: an always-on machine with a tunnel relays to your others (set up automatically once both are paired).
 4. **Tailscale / Headscale**: the last fallback.
 
@@ -90,7 +90,7 @@ What each third party can see is in [docs/AWAY.md](docs/AWAY.md).
 - The app **locks behind your fingerprint, face or screen lock**, keeps tokens and your `doas` password in the Android Keystore, and can hide itself from screenshots.
 - Root actions (power modes, services, restart) use **your own `doas` password**, typed into a private terminal and never stored or logged by the daemon.
 
-Switches: `HOMECTL_NO_TERMINAL=1`, `HOMECTL_NO_DELETE=1`, `HOMECTL_NO_EDIT=1`, `HOMECTL_TUNNEL=off`, `HOMECTL_NO_RENDEZVOUS=1`, `HOMECTL_ADDR=host:port`, `HOMECTL_DRYRUN=1` (power actions only log).
+Switches: `HOMECTL_NO_TERMINAL=1`, `HOMECTL_NO_DELETE=1`, `HOMECTL_NO_EDIT=1`, `HOMECTL_TUNNEL=off|quick|auto`, `HOMECTL_NO_RENDEZVOUS=1`, `HOMECTL_ADDR=host:port`, `HOMECTL_DRYRUN=1` (power actions only log).
 
 ## Notes
 

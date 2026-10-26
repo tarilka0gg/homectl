@@ -45,6 +45,12 @@ pub(crate) struct App {
     port: u16,
     tunnel: net::TunnelUrl,
     tunnel_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// `HOMECTL_TUNNEL=auto`: the tunnel follows whether a server (hub) relays to this machine
+    tunnel_auto: bool,
+    /// someone switched the tunnel by hand: automatic control stops until the daemon restarts
+    tunnel_manual: std::sync::atomic::AtomicBool,
+    /// last check of the hubs: None = no hubs / not checked yet
+    hub_up: Mutex<Option<bool>>,
     pub(crate) failures: AtomicU32,
     pub(crate) peers: relay::Peers,
     pub(crate) devices: device::Devices,
@@ -149,8 +155,9 @@ fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default().trim().to_string()
 }
 
-async fn ping() -> impl IntoResponse {
-    Json(json!({ "homectl": 1, "name": hostname() }))
+async fn ping(State(app): S) -> impl IntoResponse {
+    // `tunnel` lets a machine that relies on this one as its server know the public route is really up
+    Json(json!({ "homectl": 1, "name": hostname(), "tunnel": app.tunnel.read().unwrap().is_some() }))
 }
 
 async fn endpoints(State(app): S) -> impl IntoResponse {
@@ -692,10 +699,13 @@ async fn tunnel_get(State(app): S) -> impl IntoResponse {
         "available": net::tunnel_available().await,
         "on": app.tunnel_task.lock().unwrap().is_some(),
         "url": app.tunnel.read().unwrap().clone(),
+        "auto": app.tunnel_auto && !app.tunnel_manual.load(Ordering::Relaxed),
+        "hub_up": *app.hub_up.lock().unwrap(),
     }))
 }
 
 async fn tunnel_post(State(app): S, Json(c): Json<On>) -> StatusCode {
+    app.tunnel_manual.store(true, Ordering::Relaxed);
     let mut task = app.tunnel_task.lock().unwrap();
     if c.on && task.is_none() {
         *task = Some(net::spawn_tunnel(app.port, app.tunnel.clone(), app.token.clone()));
@@ -706,6 +716,75 @@ async fn tunnel_post(State(app): S, Json(c): Json<On>) -> StatusCode {
         *app.tunnel.write().unwrap() = None;
     }
     StatusCode::NO_CONTENT
+}
+
+/// The servers that relay to this machine (their LAN / tailnet addresses), as set by the app when it links them.
+async fn hubs_get(State(app): S) -> impl IntoResponse {
+    Json(json!({ "hubs": net::load_hubs(), "auto": app.tunnel_auto, "relays_for_others": app.peers.any() }))
+}
+
+#[derive(Deserialize)]
+struct HubsIn {
+    urls: Vec<String>,
+}
+
+async fn hubs_set(State(app): S, Json(h): Json<HubsIn>) -> Response {
+    // a machine that is itself somebody's server must keep its own tunnel, or two machines could each wait for the other
+    if app.peers.any() {
+        return (StatusCode::CONFLICT, Json(json!({ "error": "this machine relays for others and keeps its own tunnel" }))).into_response();
+    }
+    let urls: Vec<String> = h.urls.into_iter().map(|u| u.trim_end_matches('/').to_string()).filter(|u| net::valid_hub(u)).take(6).collect();
+    net::save_hubs(&urls);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn hubs_clear() -> StatusCode {
+    net::save_hubs(&[]);
+    StatusCode::NO_CONTENT
+}
+
+/// `HOMECTL_TUNNEL=auto`: with a server linked, the machine's own tunnel is off while the server answers (and has its tunnel up),
+/// starts when it has not answered for three checks in a row, and stops again after three good ones. Without a server it simply
+/// keeps the tunnel on, as `quick` does.
+fn auto_tunnel(app: Arc<App>) {
+    let every = std::env::var("HOMECTL_AUTO_TUNNEL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(20u64);
+    tokio::spawn(async move {
+        let (mut good, mut bad) = (0u32, 0u32);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(every)).await;
+            if app.tunnel_manual.load(Ordering::Relaxed) {
+                continue;
+            }
+            let hubs = net::load_hubs();
+            let running = app.tunnel_task.lock().unwrap().is_some();
+            let want = if hubs.is_empty() || app.peers.any() {
+                *app.hub_up.lock().unwrap() = None;
+                true
+            } else {
+                let mut up = false;
+                for h in &hubs {
+                    if net::hub_ok(h).await {
+                        up = true;
+                        break;
+                    }
+                }
+                *app.hub_up.lock().unwrap() = Some(up);
+                if up { (good, bad) = (good + 1, 0) } else { (good, bad) = (0, bad + 1) }
+                if running { good < 3 } else { bad >= 3 }
+            };
+            let mut task = app.tunnel_task.lock().unwrap();
+            if want && task.is_none() {
+                eprintln!("no server reaches this machine: starting its own tunnel");
+                *task = Some(net::spawn_tunnel(app.port, app.tunnel.clone(), app.token.clone()));
+            } else if !want && task.is_some() {
+                eprintln!("a server reaches this machine: stopping its own tunnel");
+                if let Some(t) = task.take() {
+                    t.abort();
+                }
+                *app.tunnel.write().unwrap() = None;
+            }
+        }
+    });
 }
 
 // ---- pairing (no token yet; LAN / tailnet only) ----
@@ -802,15 +881,23 @@ async fn main() {
     let inbox = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join("homectl-inbox");
     std::fs::create_dir_all(&inbox).expect("create inbox");
     let tunnel: net::TunnelUrl = Default::default();
-    let tunnel_task = std::env::var("HOMECTL_TUNNEL").is_ok_and(|v| v == "quick").then(|| net::spawn_tunnel(port, tunnel.clone(), token.clone()));
+    let mode = std::env::var("HOMECTL_TUNNEL").unwrap_or_default();
+    let tunnel_auto = mode == "auto";
+    let peers = relay::Peers::load(config_dir());
+    // auto: start at once unless a server is linked (then the checks decide, so a server that is up costs no tunnel at all)
+    let start_tunnel = mode == "quick" || (tunnel_auto && (net::load_hubs().is_empty() || peers.any()));
+    let tunnel_task = start_tunnel.then(|| net::spawn_tunnel(port, tunnel.clone(), token.clone()));
     let app = Arc::new(App {
         token,
         inbox,
         port,
         tunnel,
         tunnel_task: Mutex::new(tunnel_task),
+        tunnel_auto,
+        tunnel_manual: Default::default(),
+        hub_up: Mutex::new(None),
         failures: AtomicU32::new(0),
-        peers: relay::Peers::load(config_dir()),
+        peers,
         devices: device::Devices::load(config_dir()),
         device_always: std::sync::atomic::AtomicBool::new(config_dir().join("device-always").exists()),
         tls_fp: tls.as_ref().map(|t| t.fingerprint.clone()).unwrap_or_default(),
@@ -819,6 +906,9 @@ async fn main() {
         sessions: Default::default(),
         pairing: Default::default(),
     });
+    if tunnel_auto {
+        auto_tunnel(app.clone());
+    }
 
     let api = Router::new()
         .route("/endpoints", get(endpoints))
@@ -891,6 +981,7 @@ async fn main() {
         .route("/priv/test", post(priv_test))
         .route("/priv/rapl", post(priv_rapl))
         .route("/tunnel", get(tunnel_get).post(tunnel_post))
+        .route("/hubs", get(hubs_get).post(hubs_set).delete(hubs_clear))
         .route("/peers", get(relay::list).post(relay::upsert))
         .route("/peers/{id}", axum::routing::delete(relay::remove))
         .layer(axum::extract::DefaultBodyLimit::disable())

@@ -1,8 +1,9 @@
 #!/sbin/openrc-run
 # homectl daemon as an OpenRC service, supervised (restarts itself if it ever crashes).
 # Settings live in /etc/conf.d/homectl:  HOMECTL_USER=...  HOMECTL_BIN=/path/to/homectl
-# Public tunnel (default on, so the app can reach this machine away from home): HOMECTL_TUNNEL=quick uses a Cloudflare quick tunnel
-# via the cloudflared next to the binary (or on PATH); set HOMECTL_TUNNEL=off in /etc/conf.d/homectl to disable.
+# Public tunnel (default "auto", so the app can reach this machine away from home): a Cloudflare quick tunnel via the cloudflared
+# next to the binary (or on PATH). auto = on, unless a server that relays to this machine is up (then it is off and starts by itself
+# when the server stops answering); quick = always on; off = never. Set HOMECTL_TUNNEL in /etc/conf.d/homectl to change it.
 description="homectl control daemon"
 
 : "${HOMECTL_USER:=root}"
@@ -26,8 +27,8 @@ start_pre() {
 	# the supervisor opens the log after dropping to the service user, so the file has to exist and belong to them
 	checkpath -f -m 0640 -o "$HOMECTL_USER" /var/log/homectl.log
 	# an outbound-only tunnel, so the phone can reach this machine from anywhere (no port forwarding, works behind carrier NAT)
-	if [ "${HOMECTL_TUNNEL:-quick}" != "off" ]; then
-		export HOMECTL_TUNNEL=quick
+	if [ "${HOMECTL_TUNNEL:-auto}" != "off" ]; then
+		export HOMECTL_TUNNEL="${HOMECTL_TUNNEL:-auto}"
 		if [ -x "$(dirname "$HOMECTL_BIN")/cloudflared" ]; then export HOMECTL_CLOUDFLARED="$(dirname "$HOMECTL_BIN")/cloudflared"; fi
 	fi
 	# the daemon keeps its token and settings under $HOME
