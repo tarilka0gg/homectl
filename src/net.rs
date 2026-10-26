@@ -246,15 +246,15 @@ mod tests {
 
     #[test]
     fn only_private_and_tailnet_addresses_are_accepted_as_hubs() {
-        assert!(valid_hub("http://192.168.1.66:7878"));
+        assert!(valid_hub("http://192.168.1.10:7878"));
         assert!(valid_hub("http://100.64.0.1:7878"));
         assert!(valid_hub("http://10.0.0.5:7878"));
         assert!(!valid_hub("http://8.8.8.8:7878"));
-        assert!(!valid_hub("https://192.168.1.66:7878"));
-        assert!(!valid_hub("http://192.168.1.66"));
+        assert!(!valid_hub("https://192.168.1.10:7878"));
+        assert!(!valid_hub("http://192.168.1.10"));
         assert!(!valid_hub("http://example.com:7878"));
         assert!(!valid_hub("http://100.200.0.1:7878"));
-        assert!(!valid_hub("http://192.168.1.66:7878/x"));
+        assert!(!valid_hub("http://192.168.1.10:7878/x"));
     }
 
     #[test]

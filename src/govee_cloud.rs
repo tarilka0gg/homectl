@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn device_ids_compare_without_colons_or_case() {
-        assert_eq!(norm("D0:C9:07:05:9D:1E"), norm("d0c907059d1e"));
+        assert_eq!(norm("AA:BB:CC:00:11:22"), norm("aabbcc001122"));
     }
 
     #[test]
