@@ -3,6 +3,14 @@
 All notable changes to homectl, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/), with
 `## [version] - date` headings. The app and the daemon share one version number.
 
+## [0.19.0] - 2026-10-26
+
+### Added
+- **Govee lights without LAN Control can be controlled through Govee's cloud.** Some bulbs (for example the H6009 Smart LED Bulb) never answer the LAN protocol, so homectl could not see them at all. Paste a Govee API key (Govee Home app → Profile → Settings → Apply for API Key; it arrives by email) under **Controls → Lights → Govee cloud**, and the lights in your Govee account that the LAN scan did not find appear next to the others, marked "cloud", with the same power, brightness, colour wheel and white-temperature controls, and in the "all lights" group. Lights that answer on the LAN stay on the faster LAN path.
+  - The key is stored on the machine (`~/.config/homectl/govee.key`, mode 600), is never sent back to the app or written to the log, is handed to `curl` on standard input so it is not in the process list, and goes only to Govee.
+  - Govee allows about 10 commands a minute per light, so light states are cached for 45 seconds and the device list for 10 minutes; what you set is shown at once.
+  - New daemon endpoints: `GET/POST/DELETE /api/govee` (is a key set / set it / remove it). An older daemon simply does not show the section.
+
 ## [0.18.8] - 2026-10-26
 
 ### Fixed

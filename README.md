@@ -96,7 +96,7 @@ Switches: `HOMECTL_NO_TERMINAL=1`, `HOMECTL_NO_DELETE=1`, `HOMECTL_NO_EDIT=1`, `
 
 * An NVIDIA dGPU is read with `nvidia-smi` **only while it is already awake and the laptop is on AC**; asking a sleeping card wakes it. Intel and AMD GPUs are read from sysfs.
 * CPU package power needs read access to `/sys/class/powercap/intel-rapl:*/energy_uj`, which Linux makes root-only; the app offers to allow it until the next reboot.
-* Govee lights need **LAN Control** switched on for each light in the Govee app.
+* Govee lights need **LAN Control** switched on for each light in the Govee app. Lights that have none (some bulbs, e.g. H6009) can be driven through Govee's cloud instead: in the Govee Home app open Profile → Settings → Apply for API Key, then paste the key under Controls → Lights → Govee cloud. The key stays on the machine and goes only to Govee; the cloud allows about 10 commands a minute per light, and needs `curl` on the machine.
 * Power modes are `<name>-on.sh` + `<name>-off.sh` pairs in your home, `~/.local/bin` or `/usr/local/bin`, or entries in `~/.config/homectl/actions.json` (see `docs/actions.example.json`). They run through `doas`.
 * Android lets an app read the phone's clipboard only while it is in front, so the common clipboard sends the phone's copies automatically while homectl is open; with it closed, use the **Send clipboard** button in the notification or the quick-settings tile.
 * The tunnel's TLS ends at Cloudflare, which can see that traffic; the certificate pinning covers the other routes. Request bodies are not signed (they travel inside TLS). A compromised, unlocked phone can still sign requests.

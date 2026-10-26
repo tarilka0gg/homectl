@@ -11,13 +11,25 @@ use tokio::{net::UdpSocket, sync::Mutex, time::timeout};
 
 #[derive(Serialize, Clone)]
 pub struct Light {
+    /// The address to control it by; for a light reached through the Govee cloud it is `cloud-<device id>`.
     ip: String,
     sku: String,
-    device: String,
+    pub(crate) device: String,
     on: Option<bool>,
     brightness: Option<u64>,
     rgb: Option<[u64; 3]>,
     kelvin: Option<u64>,
+    /// "lan" or "cloud"
+    via: &'static str,
+    name: Option<String>,
+    online: Option<bool>,
+}
+
+impl Light {
+    #[allow(clippy::too_many_arguments)]
+    pub fn cloud(id: String, sku: String, device: String, name: Option<String>, online: bool, on: Option<bool>, brightness: Option<u64>, rgb: Option<[u64; 3]>, kelvin: Option<u64>) -> Self {
+        Light { ip: id, sku, device, on, brightness, rgb, kelvin, via: "cloud", name, online: Some(online) }
+    }
 }
 
 static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -39,7 +51,7 @@ async fn discover(sock: &UdpSocket) -> Vec<Light> {
         let d = &v["msg"]["data"];
         let (Some(ip), Some(sku), Some(device)) = (d["ip"].as_str(), d["sku"].as_str(), d["device"].as_str()) else { continue };
         if !found.iter().any(|l| l.ip == ip) {
-            found.push(Light { ip: ip.into(), sku: sku.into(), device: device.into(), on: None, brightness: None, rgb: None, kelvin: None });
+            found.push(Light { ip: ip.into(), sku: sku.into(), device: device.into(), on: None, brightness: None, rgb: None, kelvin: None, via: "lan", name: None, online: None });
         }
     }
     found

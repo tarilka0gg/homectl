@@ -6,6 +6,7 @@ mod device;
 mod display;
 mod fs;
 mod govee;
+mod govee_cloud;
 mod monitor;
 mod net;
 mod pair;
@@ -381,13 +382,47 @@ struct Rescan {
     rescan: Option<u8>,
 }
 
+/// Lights found on the LAN, then (when a Govee API key is set) the ones only the Govee cloud can reach.
+async fn all_lights(rescan: bool) -> Value {
+    let mut list = govee::lights(rescan).await;
+    let cloud = govee_cloud::lights(&list, rescan).await;
+    list.extend(cloud);
+    json!(list)
+}
+
 async fn lights(Query(q): Query<Rescan>) -> impl IntoResponse {
     if q.rescan.is_some() {
-        let v = json!(govee::lights(true).await);
+        let v = all_lights(true).await;
         swr::put("lights", &v);
         return Json(v);
     }
-    Json(swr::get("lights", std::time::Duration::from_secs(6), || async { json!(govee::lights(false).await) }).await)
+    Json(swr::get("lights", std::time::Duration::from_secs(6), || async { all_lights(false).await }).await)
+}
+
+async fn govee_get() -> impl IntoResponse {
+    Json(json!({ "cloud": govee_cloud::has_key() }))
+}
+
+#[derive(Deserialize)]
+struct GoveeKey {
+    key: String,
+}
+
+/// Saves the Govee API key (never read back through the API) and drops the cached light list so the cloud lights appear at once.
+async fn govee_set(Json(k): Json<GoveeKey>) -> Response {
+    match govee_cloud::set_key(&k.key) {
+        Ok(()) => {
+            swr::forget("lights");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(why) => (StatusCode::BAD_REQUEST, Json(json!({ "error": why }))).into_response(),
+    }
+}
+
+async fn govee_clear() -> StatusCode {
+    govee_cloud::clear_key();
+    swr::forget("lights");
+    StatusCode::NO_CONTENT
 }
 
 #[derive(Deserialize)]
@@ -399,6 +434,11 @@ struct LightCmd {
 }
 
 async fn light_set(Path(ip): Path<String>, Json(c): Json<LightCmd>) -> StatusCode {
+    if ip.starts_with(govee_cloud::PREFIX) {
+        let ok = govee_cloud::command(&ip, c.on, c.brightness, c.rgb, c.kelvin).await;
+        swr::forget("lights");
+        return if ok { StatusCode::NO_CONTENT } else { StatusCode::BAD_GATEWAY };
+    }
     let Ok(ip) = ip.parse() else { return StatusCode::BAD_REQUEST };
     swr::forget("lights");
     if govee::command(ip, c.on, c.brightness, c.rgb, c.kelvin).await.is_ok() {
@@ -788,6 +828,7 @@ async fn main() {
         .route("/brightness", get(get_brightness).post(set_brightness))
         .route("/lights", get(lights))
         .route("/lights/{ip}", post(light_set))
+        .route("/govee", get(govee_get).post(govee_set).delete(govee_clear))
         .route("/files/{name}", post(upload))
         .route("/audio", get(audio_get))
         .route("/audio/{target}", post(audio_post))

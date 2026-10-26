@@ -18,6 +18,9 @@ You will get an answer within a few days; fixes ship as a new release and are cr
   tailnet); "Refuse plain connections" and "Require this phone on the home network too" tighten this.
 - **Root actions** use the user's own `doas` password, sent once over the encrypted link and typed into a pseudo-terminal; the
   daemon never stores or logs it. The phone keeps it in the Android Keystore behind biometrics/screen lock.
+- **Govee API key** (optional, for lights without LAN Control) is saved in `~/.config/homectl/govee.key` (mode 600). The daemon never
+  returns it through its API or logs it, passes it to `curl` on standard input (not on the command line) and sends it only to
+  `openapi.api.govee.com`. Anyone with the access token can replace or remove it, not read it.
 - **Not covered:** a compromised phone that is unlocked; request bodies aren't signed (they travel inside TLS); the tunnel's TLS is
   terminated by Cloudflare, which can see that traffic; free quick tunnels have no uptime guarantee.
 
