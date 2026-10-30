@@ -40,6 +40,7 @@ fun DevicesScreen(onAddMachine: () -> Unit) {
     PowerSection()
     ScreensSection()
     MachinesSection(onAddMachine)
+    ContainersSection()
     LightsScreen()
     TailscaleSection()
 }
@@ -339,7 +340,7 @@ private fun macsOf(m: Machine): List<String> = Hc.memStr("mac.${m.id}").split(',
 /** Asks every machine that is online and whose cards are not yet known for them; a machine that is off can only be woken with this. */
 suspend fun learnMacs() {
     for (m in Hc.machines.toList()) {
-        if (m.offline || macsOf(m).isNotEmpty()) continue
+        if (m.offline || m.container || macsOf(m).isNotEmpty()) continue
         val a = m.array("/api/macs") ?: continue
         val list = a.objs().sortedBy { it.optBoolean("wireless") }.map { it.str("mac") }
         if (list.isNotEmpty()) Hc.memPutStr("mac.${m.id}", list.joinToString(","))
@@ -363,7 +364,7 @@ private suspend fun wakeUp(m: Machine): Boolean {
         }.isSuccess
     }
     var viaPeer = false
-    for (h in Hc.machines.toList().filter { it.id != m.id && !it.offline }) for (mac in macs) if (h.call("POST", "/api/wake", body("mac" to mac)) != null) viaPeer = true
+    for (h in Hc.machines.toList().filter { it.id != m.id && !it.offline && !it.container }) for (mac in macs) if (h.call("POST", "/api/wake", body("mac" to mac)) != null) viaPeer = true
     return viaPeer || viaPhone
 }
 

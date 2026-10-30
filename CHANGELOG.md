@@ -3,6 +3,17 @@
 All notable changes to homectl, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/), with
 `## [version] - date` headings. The app and the daemon share one version number.
 
+## [Unreleased]
+
+### Fixed
+- **Memory.** The static build used musl's allocator, which never gave memory back under the daemon's load (about 2 MB per 100 folder listings, 62 MB after hours, 310 MB at its peak); it now uses mimalloc and stays flat. Transcript copies of ended Claude Code sessions are dropped, the tool-name map no longer grows with every call, and the terminal replay buffer joins small writes.
+
+### Added
+- **Container hosts.** On a Proxmox (`pct`), LXC or Incus host, a daemon running as root serves each container to its own phones. An invite code (`POST /api/containers/{id}/invite`, or `homectl containers invite <id>`) pairs a phone with one container. Its token reaches only that container's Monitor, processes, Terminal and Files, served by an agent (`homectl ct-agent`) that joins the container's namespaces, enters its root and becomes its root, plus starting and stopping it (`/api/container`). Every other request with that token is refused on the host. The owner can open every container through the host (`/peer/ct-<id>/…`) only after switching it on (`POST /api/containers/owner`). Privileged containers are refused.
+- The app shows a container as a machine with only Monitor, Terminal and Files, and a Container card to start, restart or shut it down. On a host, Devices has a Containers section: start and stop, invite a phone, remove phones, and open a container.
+- A container's Monitor leaves out the host's hardware readings; on a container host the pending pairing codes (`/api/pair/pending`) need the host token, and a container's token can't use the tunnel or enrol phones on the host.
+- **Pairing by code with a typed address.** An address without a token now asks for the pairing (or invite) code, so a machine that isn't found nearby can be paired by code too.
+
 ## [0.20.0] - 2026-10-26
 
 ### Changed

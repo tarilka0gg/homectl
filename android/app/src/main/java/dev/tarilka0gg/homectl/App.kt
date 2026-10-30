@@ -4,6 +4,7 @@ package dev.tarilka0gg.homectl
 
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
 import android.os.Build
 import android.widget.Toast
 import androidx.compose.foundation.ScrollState
@@ -61,6 +62,9 @@ fun App() {
     }
     var menu by remember { mutableStateOf(false) }
     val m = Hc.cur!!
+    // a container (from a host in host mode) is only a Monitor, a Terminal and Files; the rest belongs to the host
+    val tabs = if (m.container) listOf(Tab.Monitor, Tab.Terminal, Tab.Files) else Tab.entries
+    val shown = if (tab in tabs) tab else Tab.Monitor
     LaunchedEffect(Hc.fullView) {
         val w = Hc.activity?.window ?: return@LaunchedEffect
         val c = androidx.core.view.WindowCompat.getInsetsController(w, w.decorView)
@@ -120,8 +124,8 @@ fun App() {
                 Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
                     Column(Modifier.fillMaxWidth().navigationBarsPadding()) {
                         Row(Modifier.fillMaxWidth().height(36.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Tab.entries.forEach {
-                                val tint = if (tab == it) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            tabs.forEach {
+                                val tint = if (shown == it) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                                 Box(Modifier.weight(1f).fillMaxHeight().clickable { tab = it; Hc.memPutStr("tab.name", it.name) }, contentAlignment = Alignment.Center) {
                                     Icon(it.icon, it.label, Modifier.size(24.dp), tint = tint)
                                 }
@@ -135,10 +139,10 @@ fun App() {
                         ) {
                             // the names sit under their icons, centred on them; the spacer lines up with the menu button
                             Row(Modifier.fillMaxWidth().clipToBounds().padding(bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Tab.entries.forEach {
+                                tabs.forEach {
                                     Text(it.label, Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false,
                                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                                        color = if (tab == it) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                                        color = if (shown == it) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                                 Text("Menu", Modifier.width(48.dp), style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false,
                                     textAlign = androidx.compose.ui.text.style.TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -149,13 +153,13 @@ fun App() {
             }
         },
     ) { pad ->
-        if (tab == Tab.Terminal || tab == Tab.Files || tab == Tab.Windows) {
+        if (shown == Tab.Terminal || shown == Tab.Files || shown == Tab.Windows) {
             // full screen: the camera cut-out is still kept clear (except under a video, which is letterboxed anyway)
             val cut = if (Hc.fullView && !Hc.videoView) Modifier.windowInsetsPadding(WindowInsets.displayCutout) else Modifier
-            Box(Modifier.padding(pad).then(cut).fillMaxSize()) { when (tab) { Tab.Terminal -> TerminalScreen(); Tab.Windows -> WindowsScreen(); else -> FilesScreen() } }
+            Box(Modifier.padding(pad).then(cut).fillMaxSize()) { when (shown) { Tab.Terminal -> TerminalScreen(); Tab.Windows -> WindowsScreen(); else -> FilesScreen() } }
         } else {
-            Column(Modifier.padding(pad).fillMaxSize().verticalScroll(scrolls.getValue(tab)).padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                when (tab) {
+            Column(Modifier.padding(pad).fillMaxSize().verticalScroll(scrolls.getValue(shown)).padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                when (shown) {
                     Tab.Monitor -> MonitorScreen()
                     Tab.Controls -> ControlsScreen()
                     Tab.Files -> {}
@@ -205,8 +209,8 @@ private fun AddMachineScreen(canCancel: Boolean, onDone: () -> Unit) {
     }
     val known = Hc.machines.flatMap { m -> m.endpoints.map { it.url } }.toSet()
 
-    fun finish(f: Found, token: String, fp: String? = null) {
-        val m = Machine(token.take(10), f.name, token, listOf(Endpoint(f.kind, f.url)), fp)
+    fun finish(f: Found, token: String, fp: String? = null, container: Boolean = false) {
+        val m = Machine(token.take(10), f.name, token, listOf(Endpoint(f.kind, f.url)), fp, container = container)
         Hc.add(m)
         scope.launch { m.resolve() }
         onDone()
@@ -245,10 +249,17 @@ private fun AddMachineScreen(canCancel: Boolean, onDone: () -> Unit) {
 
             Section("Pairing link or address") {
                 OutlinedTextField(link, { link = it; linkError = false }, Modifier.fillMaxWidth(), label = { Text("homectl:// link, or http://host:7878") }, isError = linkError)
+                if (!link.startsWith("homectl://")) Text("With an address and no token, Connect asks for a pairing code (or an invite code for a container).", style = MaterialTheme.typography.bodySmall)
                 if (!link.startsWith("homectl://")) OutlinedTextField(token, { token = it }, Modifier.fillMaxWidth(), label = { Text("Token") }, singleLine = true)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button({
-                        if (Hc.pairFrom(link, token)) { Hc.cur?.let { m -> scope.launch { m.resolve() } }; onDone() } else linkError = true
+                        val addr = link.trim().trimEnd('/')
+                        // an address without a token: pair by code, like a machine found nearby (a container's invite code works here too)
+                        if (token.isBlank() && addr.startsWith("http")) scope.launch {
+                            val f = Found(Uri.parse(addr).host ?: addr, addr, Hc.kindOf(addr))
+                            val r = Net.postJson(f.url, "/api/pair/request", body("device" to Build.MODEL))
+                            if (r == null) linkError = true else { code = ""; pending = f to r.getString("id") }
+                        } else if (Hc.pairFrom(link, token)) { Hc.cur?.let { m -> scope.launch { m.resolve() } }; onDone() } else linkError = true
                     }) { Text("Connect") }
                     OutlinedButton({
                         val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -276,7 +287,7 @@ private fun AddMachineScreen(canCancel: Boolean, onDone: () -> Unit) {
                         val r: JSONObject? = Net.postJson(f.url, "/api/pair/confirm", body("id" to id, "code" to code))
                         if (r == null) { Toast.makeText(ctx, "Wrong or expired code", Toast.LENGTH_LONG).show(); return@launch }
                         pending = null
-                        finish(Found(r.optString("name", f.name), f.url, f.kind), r.getString("token"), r.optString("fp").ifBlank { null })
+                        finish(Found(r.optString("name", f.name), f.url, f.kind), r.getString("token"), r.optString("fp").ifBlank { null }, r.optBoolean("container"))
                     }
                 }, enabled = code.length == 6) { Text("Pair") }
             },

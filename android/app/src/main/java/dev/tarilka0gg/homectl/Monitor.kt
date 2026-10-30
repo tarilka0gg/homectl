@@ -90,6 +90,7 @@ fun MonitorScreen() {
     }
     val scope = rememberCoroutineScope()
     if (Hc.machines.size > 1) Fleet()
+    if (Hc.cur?.container == true) ContainerCard()
     val d = data.value
     if (d == null) {
         Text(if (Hc.cur?.offline == true) "Machine is offline." else Hc.cur?.authProblem?.let { "This machine doesn't accept this phone yet: $it" } ?: "Loading…")

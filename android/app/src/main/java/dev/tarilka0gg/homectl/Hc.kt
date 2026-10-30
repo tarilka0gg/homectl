@@ -33,7 +33,9 @@ data class Endpoint(val kind: String, val url: String, val token: String? = null
  * them: probes all in parallel and uses the best one that answers. The daemon reports its current addresses on
  * every connection, so a changed tunnel URL is learned automatically.
  */
-class Machine(val id: String, name: String, val token: String, endpoints: List<Endpoint>, fp: String? = null, rv: String? = null) {
+class Machine(val id: String, name: String, val token: String, endpoints: List<Endpoint>, fp: String? = null, rv: String? = null, container: Boolean = false) {
+    /** A container on a host running homectl in host mode: only its Monitor, Terminal and Files, plus starting and stopping it. */
+    var container by mutableStateOf(container)
     /** Private channel where this machine announces its current tunnel address (signed with the access token). */
     var rv by mutableStateOf(rv)
     /** SHA-256 of this machine's certificate, pinned at pairing: connections to it are encrypted and checked against it. */
@@ -187,6 +189,8 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
     private suspend fun syncSecurity() {
         val e = active ?: return
         val direct = e.kind == "lan" || e.kind == "tailscale"
+        // a container's phone has no say in the host's list of phones, and its token never goes through the tunnel
+        if (container) return
         if (direct && !Hc.memBool("enrolled.$id")) {
             val key = runCatching { DeviceKey.publicKeyB64() }.getOrNull() ?: return
             val body = JSONObject().put("name", android.os.Build.MODEL).put("key", key)
@@ -243,6 +247,7 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         j.optString("fp").ifBlank { null }?.let { found -> if (fp == null) { fp = found; Hc.save() } } // first contact: pin it
         j.optString("rv").ifBlank { null }?.let { found -> if (rv != found) { rv = found; Hc.save() } }
         daemonVersion = j.optString("version")
+        if (container != j.optBoolean("container")) { container = j.optBoolean("container"); Hc.save() }
         val a = j.optJSONArray("urls") ?: return
         val fresh = (0 until a.length()).map { a.getJSONObject(it).let { o -> Endpoint(o.getString("kind"), o.getString("url"), o.optString("token").ifBlank { null }, o.optString("hub").ifBlank { null }) } }
         if (fresh.isNotEmpty()) {
@@ -273,6 +278,12 @@ class Machine(val id: String, name: String, val token: String, endpoints: List<E
         } catch (_: Exception) {
             null
         }
+    }
+
+    /** A GET that may well be refused (asking whether the machine has something): an error doesn't mark the machine offline. */
+    suspend fun probeJson(path: String): JSONObject? {
+        val e = active ?: return null
+        return raw(e, "GET", path)?.let { runCatching { JSONObject(it) }.getOrNull() }
     }
 
     /** Runs a request on the active address, re-resolving once if it fails. Returns the body ("" for 204) or null. */
@@ -569,7 +580,7 @@ object Hc {
         if (g is Keyring.Got.Value) {
             machines.clear()
             val a = JSONArray(g.text)
-            for (i in 0 until a.length()) a.getJSONObject(i).let { o -> machines.add(Machine(o.getString("id"), o.getString("name"), o.getString("token"), parseEndpoints(o.getJSONArray("endpoints")), o.optString("fp").ifBlank { null }, o.optString("rv").ifBlank { null })) }
+            for (i in 0 until a.length()) a.getJSONObject(i).let { o -> machines.add(Machine(o.getString("id"), o.getString("name"), o.getString("token"), parseEndpoints(o.getJSONArray("endpoints")), o.optString("fp").ifBlank { null }, o.optString("rv").ifBlank { null }, o.optBoolean("container"))) }
             loginsUnreadable = false
         } else if (g is Keyring.Got.Lost) { loginsUnreadable = false; keysLost = true }
         return !loginsUnreadable
@@ -603,7 +614,7 @@ object Hc {
             val a = JSONArray(s)
             for (i in 0 until a.length()) {
                 val o = a.getJSONObject(i)
-                machines.add(Machine(o.getString("id"), o.getString("name"), o.getString("token"), parseEndpoints(o.getJSONArray("endpoints")), o.optString("fp").ifBlank { null }, o.optString("rv").ifBlank { null }))
+                machines.add(Machine(o.getString("id"), o.getString("name"), o.getString("token"), parseEndpoints(o.getJSONArray("endpoints")), o.optString("fp").ifBlank { null }, o.optString("rv").ifBlank { null }, o.optBoolean("container")))
             }
         } ?: migrateV1()
         if (machines.isNotEmpty() && prefs.getString("machines", null) != null) save() // moves an old plain-text list into the keyring
@@ -626,7 +637,7 @@ object Hc {
         if (loginsUnreadable) return // never overwrite logins that could not be read
         val a = JSONArray()
         machines.forEach { m ->
-            a.put(JSONObject().put("id", m.id).put("name", m.name).put("token", m.token).put("fp", m.fp ?: "").put("rv", m.rv ?: "").put("endpoints", JSONArray().also { ea ->
+            a.put(JSONObject().put("id", m.id).put("name", m.name).put("token", m.token).put("fp", m.fp ?: "").put("rv", m.rv ?: "").put("container", m.container).put("endpoints", JSONArray().also { ea ->
                 m.endpoints.forEach { ea.put(JSONObject().put("kind", it.kind).put("url", it.url).put("token", it.token ?: "").put("hub", it.hub ?: "")) }
             }))
         }
@@ -692,7 +703,7 @@ object Hc {
     suspend fun autoLinkAll() {
         // a machine that is itself reached through a server is never made a server in turn (two machines relaying through each
         // other would also keep each other's tunnels running)
-        for (h in machines.toList()) if (h.active != null && h.active?.kind != "server" && h.endpoints.none { it.kind == "server" }) autoLink(h)
+        for (h in machines.toList()) if (!h.container && h.active != null && h.active?.kind != "server" && h.endpoints.none { it.kind == "server" }) autoLink(h)
     }
 
     suspend fun autoLink(hub: Machine) {

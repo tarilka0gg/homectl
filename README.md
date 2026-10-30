@@ -83,6 +83,19 @@ The app keeps every address a machine reports and tries **all of them at once**,
 
 What each third party can see is in [docs/AWAY.md](docs/AWAY.md).
 
+## Container hosts
+
+On a Proxmox, LXC or Incus host, one daemon running **as root on the host** serves every container to its own people, with nothing installed inside the containers.
+
+- **Each container is shared by invite.** The owner makes a one-time code (Devices → Containers → Invite a phone, or `homectl containers invite pct-101` on the host). On the other phone: Add machine, the host's address, and that code. That phone then has the container as a machine of its own (Monitor, Terminal, Files, and Start, Restart, Shut down) and nothing else. Every other request it makes is refused on the host. Remove phones takes the container away from all of them.
+- **The kernel keeps them apart, not path checks.** A container's side is served by an agent, a copy of the daemon that joins the container's namespaces and its root the way `lxc-attach` does, and becomes the container's root. Its files, processes and network are the container's, and it works within the container's cgroup. The agent can't be inspected from inside (not dumpable: its `/proc/<pid>/exe`, environment, descriptors and memory are closed to the container's root) and its error output goes through a pipe the host cleans and caps, not to the host's log.
+- **What a container's phone can read is limited.** Its Monitor shows the container's processes, network and files, and leaves out the host's hardware: temperatures, fans, batteries, GPUs, power, physical disks, Wi-Fi. CPU, memory and disk totals come from the container's `/proc`: with `lxcfs` (Proxmox and Incus have it by default) those are the container's own; without it they are the host's.
+- **A container's token reaches only its container.** It can't use the tunnel or write to the host's list of phones, and the host's pairing codes need the host token. Two containers can't see each other.
+- **The owner sees inside containers only when switched on** (Devices → Containers → Open containers from this phone, or `homectl containers owner-on`). Containers then open from the host's machine, through the host. Starting, stopping and inviting work either way. What a container returns reaches the owner's phone, so open containers you trust.
+- **Privileged containers are refused**: their root is the host's root, so they can't be kept apart from it.
+
+`homectl containers` lists them. Invites work for 15 minutes, once, and only on the home network, like pairing; five wrong codes burn the pairing request they were typed on. The agent doesn't apply the container's AppArmor profile or seccomp filter; it is bounded by the container's user namespace. The host's own token is a root shell on the host, as on any machine where the daemon runs as root: keep it to yourself.
+
 ## Security model
 
 - Every request needs the machine's **access token** (24 random bytes, mode 600).
