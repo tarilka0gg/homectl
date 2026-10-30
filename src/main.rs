@@ -1,5 +1,6 @@
 mod actions;
 mod archive;
+mod claude;
 mod clip;
 mod ctl;
 mod device;
@@ -14,6 +15,7 @@ mod pairlink;
 mod privileged;
 mod procfs;
 mod relay;
+mod screen;
 mod sensors;
 mod swr;
 mod sys;
@@ -934,6 +936,11 @@ async fn index() -> Html<&'static str> {
 #[tokio::main(worker_threads = 4)]
 async fn main() {
     // a short-lived helper: measures one folder's size in its own process (see fs::scan) and exits, so the daemon never holds the memory
+    // the root side of the Claude Code reader (see claude.rs); started by its own OpenRC service, never by the daemon
+    if std::env::args().nth(1).as_deref() == Some("claude-helper") {
+        claude::helper_main(&std::env::args().skip(2).collect::<Vec<_>>());
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("scan-usage") {
         fs::scan_usage_main(&std::env::args().skip(2).collect::<Vec<_>>());
         return;
@@ -1023,6 +1030,13 @@ async fn main() {
         .route("/procs/{pid}/{sig}", post(proc_signal))
         .route("/windows", get(windows::list))
         .route("/windows/{id}/screen", get(windows::screen))
+        .route("/windows/{id}/chat", get(windows::chat))
+        .route("/screens", get(screen::list))
+        .route("/screens/{name}/frame", get(screen::frame))
+        .route("/screens/{name}/stream", get(screen::stream))
+        .route("/niri-windows/{id}/stream", get(screen::window_stream))
+        .route("/screens/{name}/pointer", post(screen::pointer_post))
+        .route("/keys", post(screen::keys_post))
         .route("/windows/{id}/input", post(windows::input))
         .route("/windows/{id}/focus", post(windows::focus))
         .route("/windows/{id}/close", post(windows::close))

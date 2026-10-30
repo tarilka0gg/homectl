@@ -1,0 +1,29 @@
+#!/sbin/openrc-run
+# Reads Claude Code sessions started as root (`doas claude`) for the homectl daemon of one user, so the phone can show the
+# whole conversation (see src/claude.rs). Runs as root, answers only that user on /run/homectl-claude.sock, and serves a session
+# only while it runs inside one of that user's homectl-pty terminals.
+# Settings in /etc/conf.d/homectl-claude:  HOMECTL_USER=...  HOMECTL_CLAUDE_DIR=/root/.claude
+# The binary must be root's own copy (install-claude-helper.sh puts one in /usr/local/libexec): a root service that runs a
+# file the user can write would hand that user root.
+description="homectl: Claude Code sessions for the phone"
+
+: "${HOMECTL_USER:=}"
+: "${HOMECTL_CLAUDE_DIR:=/root/.claude}"
+: "${HOMECTL_CLAUDE_BIN:=/usr/local/libexec/homectl-claude-helper}"
+
+supervisor=supervise-daemon
+command="$HOMECTL_CLAUDE_BIN"
+command_args="claude-helper --user $HOMECTL_USER --dir $HOMECTL_CLAUDE_DIR"
+output_log="/var/log/homectl-claude.log"
+error_log="/var/log/homectl-claude.log"
+respawn_delay=5
+respawn_max=0
+
+start_pre() {
+	[ -n "$HOMECTL_USER" ] || { eerror "set HOMECTL_USER in /etc/conf.d/homectl-claude"; return 1; }
+	# refuse a binary anyone but root could change
+	if [ "$(stat -c %u "$HOMECTL_CLAUDE_BIN")" != 0 ] || [ -n "$(find "$HOMECTL_CLAUDE_BIN" -perm /022)" ]; then
+		eerror "$HOMECTL_CLAUDE_BIN must belong to root and not be writable by others"
+		return 1
+	fi
+}

@@ -140,6 +140,68 @@ fn preview_runs(snap: &Value) -> Vec<Value> {
     tail
 }
 
+// ---- where niri has put each window ----
+
+pub(crate) fn niri_socket() -> Option<PathBuf> {
+    if let Ok(s) = std::env::var("NIRI_SOCKET") {
+        return Some(PathBuf::from(s));
+    }
+    // niri names its socket after the display it serves (niri.wayland-1.<pid>.sock); a nested niri for testing has its own, so
+    // the one for this daemon's display wins, and only without a display is the newest taken
+    let display = std::env::var("WAYLAND_DISPLAY").unwrap_or_default();
+    let display = display.rsplit('/').next().unwrap_or("").to_string();
+    let rd = std::fs::read_dir(runtime_dir()).ok()?;
+    let socks: Vec<_> = rd.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("niri.") && e.file_name().to_string_lossy().ends_with(".sock")).collect();
+    let newest = |it: Vec<&std::fs::DirEntry>| it.into_iter().max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok()).map(|e| e.path());
+    let mine: Vec<_> = socks.iter().filter(|e| !display.is_empty() && e.file_name().to_string_lossy().starts_with(&format!("niri.{display}."))).collect();
+    if !mine.is_empty() { newest(mine) } else { newest(socks.iter().collect()) }
+}
+
+/// One request on niri's IPC socket ("Windows", "Workspaces", "Outputs"); None when niri is not the compositor.
+async fn niri(req: &str) -> Option<Value> {
+    let path = niri_socket()?;
+    let work = async {
+        let mut s = UnixStream::connect(path).await.ok()?;
+        s.write_all(format!("\"{req}\"\n").as_bytes()).await.ok()?;
+        let mut buf = Vec::with_capacity(16 * 1024);
+        let mut r = tokio::io::BufReader::new(s);
+        tokio::io::AsyncBufReadExt::read_until(&mut r, b'\n', &mut buf).await.ok()?;
+        let v: Value = serde_json::from_slice(&buf).ok()?;
+        Some(v["Ok"][req].clone())
+    };
+    timeout(Duration::from_millis(800), work).await.ok().flatten().filter(|v| !v.is_null())
+}
+
+/// For each niri window, keyed by (app id, title): which screen it is on, whether it is visible there now, its size, and for
+/// floating windows where on the screen it is (as fractions), so the phone can show just that part.
+async fn placements() -> Vec<((String, String), Value)> {
+    let (Some(wins), Some(spaces), Some(outs)) = (niri("Windows").await, niri("Workspaces").await, niri("Outputs").await) else { return vec![] };
+    let mut out = vec![];
+    for w in wins.as_array().into_iter().flatten() {
+        let ws = spaces.as_array().into_iter().flatten().find(|x| x["id"] == w["workspace_id"]);
+        let output = ws.and_then(|x| x["output"].as_str()).unwrap_or("").to_string();
+        let logical = &outs[&output]["logical"];
+        let mut p = json!({
+            "niri": w["id"], "output": output,
+            "visible": ws.is_some_and(|x| x["is_active"] == true),
+            "active": ws.is_some_and(|x| x["active_window_id"] == w["id"]),
+            "floating": w["is_floating"], "size": w["layout"]["window_size"],
+        });
+        if let (Some(pos), Some(ow), Some(oh)) = (w["layout"]["tile_pos_in_workspace_view"].as_array(), logical["width"].as_f64(), logical["height"].as_f64()) {
+            let (x, y) = (pos[0].as_f64().unwrap_or(0.0), pos[1].as_f64().unwrap_or(0.0));
+            let off = &w["layout"]["window_offset_in_tile"];
+            let (dx, dy) = (off[0].as_f64().unwrap_or(0.0), off[1].as_f64().unwrap_or(0.0));
+            let size = &w["layout"]["window_size"];
+            let (sw, sh) = (size[0].as_f64().unwrap_or(0.0), size[1].as_f64().unwrap_or(0.0));
+            if sw > 0.0 && sh > 0.0 {
+                p["rect"] = json!([(x + dx) / ow, (y + dy) / oh, sw / ow, sh / oh]);
+            }
+        }
+        out.push(((w["app_id"].as_str().unwrap_or("").to_string(), w["title"].as_str().unwrap_or("").to_string()), p));
+    }
+    out
+}
+
 // ---- the list ----
 
 pub async fn list() -> impl IntoResponse {
@@ -161,6 +223,11 @@ pub async fn list() -> impl IntoResponse {
         }
     }
 
+    let (mut places, claude, capture) = tokio::join!(placements(), crate::claude::sessions(), crate::screen::window_capture_ok());
+    // with the patched niri every window can be pictured on its own, wherever it is
+    for (_, p) in places.iter_mut() {
+        p["capture"] = json!(capture);
+    }
     let mut cards = vec![];
     for t in tops.unwrap_or_default() {
         let mut card = json!({
@@ -175,6 +242,10 @@ pub async fn list() -> impl IntoResponse {
         if let Some((p, s)) = wid_of(&t.title).and_then(|w| by_wid.remove(&w)) {
             fill_terminal(&mut card, p, &s);
         }
+        // the same window in niri's list: same app id and title (the invisible name makes terminal titles unique)
+        if let Some(i) = places.iter().position(|(k, _)| k.0 == t.app_id && k.1 == t.title) {
+            card["place"] = places.swap_remove(i).1;
+        }
         cards.push(card);
     }
     // wrapped terminals no window title points to (no compositor, a terminal that hides its title, or an older wrapper)
@@ -188,7 +259,36 @@ pub async fn list() -> impl IntoResponse {
         fill_terminal(&mut card, p, &s);
         cards.push(card);
     }
+    // a terminal whose shell runs Claude Code: its session (name, status, last message), so the phone can show the conversation
+    for card in cards.iter_mut() {
+        let Some(pid) = card["term"].as_str().and_then(term_pid) else { continue };
+        if let Some(c) = claude.iter().find(|c| c["wrapper"].as_u64() == Some(pid as u64)) {
+            card["claude"] = c.clone();
+        }
+    }
     Json(json!({"compositor": connected, "windows": cards}))
+}
+
+#[derive(Deserialize)]
+pub struct ChatQ {
+    after: Option<u64>,
+    limit: Option<usize>,
+}
+
+/// The conversation of the Claude Code session in a mirrored terminal (see claude.rs).
+pub async fn chat(Path(id): Path<String>, Query(q): Query<ChatQ>) -> Response {
+    let Some(pid) = term_pid(&id) else { return StatusCode::NOT_FOUND.into_response() };
+    if std::env::var("HOMECTL_NO_TERMINAL").is_ok() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let sessions = crate::claude::sessions().await;
+    let Some(sid) = sessions.iter().find(|c| c["wrapper"].as_u64() == Some(pid as u64)).and_then(|c| c["session"].as_str()) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match crate::claude::chat_of(sid.to_string(), q.after, q.limit.unwrap_or(300).min(1000)).await {
+        Some(v) => Json(v).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 fn fill_terminal(card: &mut Value, pid: u32, s: &Value) {

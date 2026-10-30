@@ -1,0 +1,164 @@
+diff --git a/niri-config/src/binds.rs b/niri-config/src/binds.rs
+index 0be7596..1ce2bb7 100644
+--- a/niri-config/src/binds.rs
++++ b/niri-config/src/binds.rs
+@@ -144,6 +144,8 @@ pub enum Action {
+         show_pointer: bool,
+         path: Option<String>,
+     },
++    #[knuffel(skip)]
++    CaptureWindow { id: u64, path: String },
+     ToggleKeyboardShortcutsInhibit,
+     CloseWindow,
+     #[knuffel(skip)]
+@@ -426,6 +428,7 @@ impl From<niri_ipc::Action> for Action {
+                 show_pointer,
+                 path,
+             },
++            niri_ipc::Action::CaptureWindow { id, path } => Self::CaptureWindow { id, path },
+             niri_ipc::Action::ToggleKeyboardShortcutsInhibit {} => {
+                 Self::ToggleKeyboardShortcutsInhibit
+             }
+diff --git a/niri-ipc/src/lib.rs b/niri-ipc/src/lib.rs
+index 0aa3cb4..3a11d44 100644
+--- a/niri-ipc/src/lib.rs
++++ b/niri-ipc/src/lib.rs
+@@ -283,6 +283,20 @@ pub enum Action {
+         #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set))]
+         path: Option<String>,
+     },
++    /// Save a picture of a window to a file, without touching the clipboard.
++    ///
++    /// Works for windows on any workspace and while the monitors are off. The file is a PAM image
++    /// (P7, RGB_ALPHA), written to `<path>.tmp` and renamed to `path` once complete. The window is
++    /// then asked to draw its next frame, so capturing it repeatedly keeps it up to date.
++    #[cfg_attr(feature = "clap", clap(about = "Save a window's picture to a file (no clipboard)"))]
++    CaptureWindow {
++        /// Id of the window.
++        #[cfg_attr(feature = "clap", arg(long))]
++        id: u64,
++        /// Absolute path of the file to write.
++        #[cfg_attr(feature = "clap", arg(long))]
++        path: String,
++    },
+     /// Enable or disable the keyboard shortcuts inhibitor (if any) for the focused surface.
+     ToggleKeyboardShortcutsInhibit {},
+     /// Close a window.
+diff --git a/src/input/mod.rs b/src/input/mod.rs
+index f1ad493..07342ed 100644
+--- a/src/input/mod.rs
++++ b/src/input/mod.rs
+@@ -785,6 +785,35 @@ impl State {
+                     });
+                 }
+             }
++            Action::CaptureWindow { id, path } => {
++                let captured = {
++                    let mut windows = self.niri.layout.windows();
++                    let window = windows.find(|(_, m)| m.id().get() == id);
++                    if let Some((Some(monitor), mapped)) = window {
++                        let output = monitor.output().clone();
++                        self.backend.with_primary_renderer(|renderer| {
++                            if let Err(err) =
++                                self.niri.capture_window(renderer, &output, mapped, path)
++                            {
++                                warn!("error capturing window: {err:?}");
++                            }
++                        });
++                        Some(output)
++                    } else {
++                        None
++                    }
++                };
++                if let Some(output) = captured {
++                    // Hidden windows otherwise only get a frame callback about once a second.
++                    // Returning the output for every surface makes send_frame() send to all of them.
++                    let now = get_monotonic_time();
++                    self.niri.layout.with_windows_mut(|m, _| {
++                        if m.id().get() == id {
++                            m.send_frame(&output, now, None, |_, _| Some(output.clone()));
++                        }
++                    });
++                }
++            }
+             Action::ToggleKeyboardShortcutsInhibit => {
+                 if let Some(inhibitor) = self.niri.keyboard_focus.surface().and_then(|surface| {
+                     self.niri
+diff --git a/src/ipc/server.rs b/src/ipc/server.rs
+index db71da6..4d3aba6 100644
+--- a/src/ipc/server.rs
++++ b/src/ipc/server.rs
+@@ -475,6 +475,12 @@ fn validate_action(action: &Action) -> Result<(), String> {
+         }
+     }
+ 
++    if let Action::CaptureWindow { path, .. } = action {
++        if !Path::new(path).is_absolute() {
++            return Err(format!("path must be absolute: {path}"));
++        }
++    }
++
+     if let Action::LoadConfigFile { path: Some(path) } = action {
+         let p = Path::new(path);
+         if !p.is_file() {
+diff --git a/src/niri.rs b/src/niri.rs
+index ec40e01..65be3a2 100644
+--- a/src/niri.rs
++++ b/src/niri.rs
+@@ -5582,6 +5582,46 @@ impl Niri {
+         path: Option<String>,
+     ) -> anyhow::Result<()> {
+         let _span = tracy_client::span!("Niri::screenshot_window");
++        let (size, pixels) = self.render_window_pixels(renderer, output, mapped, show_pointer)?;
++        self.save_screenshot(size, pixels, write_to_disk, path)
++            .context("error saving screenshot")
++    }
++
++    /// Renders a window to a PAM file (no clipboard, no screenshot event), for remote viewers.
++    pub fn capture_window(
++        &self,
++        renderer: &mut GlesRenderer,
++        output: &Output,
++        mapped: &Mapped,
++        path: String,
++    ) -> anyhow::Result<()> {
++        let _span = tracy_client::span!("Niri::capture_window");
++        let (size, pixels) = self.render_window_pixels(renderer, output, mapped, false)?;
++        thread::spawn(move || {
++            let tmp = format!("{path}.tmp");
++            let header = format!(
++                "P7\nWIDTH {}\nHEIGHT {}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n",
++                size.w, size.h
++            );
++            let res = std::fs::File::create(&tmp).and_then(|mut f| {
++                use std::io::Write;
++                f.write_all(header.as_bytes())?;
++                f.write_all(&pixels)
++            });
++            if let Err(err) = res.and_then(|()| std::fs::rename(&tmp, &path)) {
++                warn!("error writing window capture: {err:?}");
++            }
++        });
++        Ok(())
++    }
++
++    fn render_window_pixels(
++        &self,
++        renderer: &mut GlesRenderer,
++        output: &Output,
++        mapped: &Mapped,
++        show_pointer: bool,
++    ) -> anyhow::Result<(Size<i32, Physical>, Vec<u8>)> {
+ 
+         let scale = Scale::from(output.current_scale().fractional_scale());
+         let alpha =
+@@ -5636,8 +5676,7 @@ impl Niri {
+             elements,
+         )?;
+ 
+-        self.save_screenshot(geo.size, pixels, write_to_disk, path)
+-            .context("error saving screenshot")
++        Ok((geo.size, pixels))
+     }
+ 
+     pub fn save_screenshot(

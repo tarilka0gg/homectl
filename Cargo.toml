@@ -11,6 +11,7 @@ libc = "0.2"
 futures-util = { version = "0.3", default-features = false }
 tokio-util = { version = "0.7", features = ["io"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
+jpeg-encoder = { version = "0.6", features = ["simd"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"
@@ -26,6 +27,8 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 ring = "0.17"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["client"] }
+wayland-scanner = "0.31"
+wayland-backend = { version = "0.3", default-features = false }
 
 [build-dependencies]
 cc = "1"
