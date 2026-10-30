@@ -2,6 +2,7 @@ mod actions;
 mod archive;
 mod claude;
 mod clip;
+mod containers;
 mod ctl;
 mod device;
 mod display;
@@ -46,8 +47,8 @@ use std::{
 pub(crate) struct App {
     pub(crate) token: String,
     inbox: PathBuf,
-    port: u16,
-    tunnel: net::TunnelUrl,
+    pub(crate) port: u16,
+    pub(crate) tunnel: net::TunnelUrl,
     tunnel_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// `HOMECTL_TUNNEL=auto`: the tunnel follows whether a server (hub) relays to this machine
     tunnel_auto: bool,
@@ -64,6 +65,10 @@ pub(crate) struct App {
     mon: monitor::Monitor,
     sessions: Arc<term::Sessions>,
     pairing: pair::Pairing,
+    /// host mode: the containers on this machine and the phones each one is shared with
+    pub(crate) containers: containers::Containers,
+    /// this process is a container's agent (see containers.rs), not a machine's daemon
+    agent: bool,
 }
 
 type S = State<Arc<App>>;
@@ -128,26 +133,27 @@ pub(crate) fn device_gate(app: &App, headers: &HeaderMap, peer: Option<SocketAdd
 }
 
 async fn auth(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
-    let ok = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|t| token_eq(t, &app.token));
-    if ok {
+    let bearer = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).map(str::to_string);
+    let ok = bearer.as_deref().is_some_and(|t| token_eq(t, &app.token));
+    // host mode: a container's token reaches that container and nothing else
+    let tenant = if ok { None } else { bearer.as_deref().and_then(|t| app.containers.tenant(t)) };
+    if ok || tenant.is_some() {
         app.failures.store(0, Ordering::Relaxed);
         let pq = req.extensions().get::<axum::extract::OriginalUri>().map_or_else(|| req.uri().to_string(), |o| o.0.path_and_query().map_or(o.0.path().to_string(), |p| p.as_str().to_string()));
         if let Err(r) = device_gate(&app, req.headers(), Some(peer), req.method().as_str(), &pq, None) {
             return r;
         }
-        next.run(req).await
+        match tenant {
+            Some(id) => containers::tenant_request(app.clone(), id, req, next).await,
+            None => next.run(req).await,
+        }
     } else {
         slow_down(&app).await;
         StatusCode::UNAUTHORIZED.into_response()
     }
 }
 
-fn status(ok: bool) -> StatusCode {
+pub(crate) fn status(ok: bool) -> StatusCode {
     if ok {
         StatusCode::NO_CONTENT
     } else {
@@ -165,6 +171,10 @@ async fn ping(State(app): S) -> impl IntoResponse {
 }
 
 async fn endpoints(State(app): S) -> impl IntoResponse {
+    if app.agent {
+        // reached only through the host: the container's own addresses have no daemon behind them
+        return Json(json!({"name": hostname(), "urls": [], "container": true, "version": env!("CARGO_PKG_VERSION")}));
+    }
     Json(net::endpoints(app.port, &app.tunnel, &app.tls_fp).await)
 }
 
@@ -852,7 +862,7 @@ fn auto_tunnel(app: Arc<App>) {
 
 // ---- pairing (no token yet; LAN / tailnet only) ----
 
-fn direct(h: &HeaderMap) -> bool {
+pub(crate) fn direct(h: &HeaderMap) -> bool {
     !device::via_tunnel(h) && !device::via_hub(h)
 }
 
@@ -881,6 +891,14 @@ async fn pair_confirm(State(app): S, headers: HeaderMap, Json(r): Json<PairConfi
     if !direct(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    // an invite code from the host's owner gives one container; it is checked only against a live request, so each guess
+    // still costs a request (few at a time, one every 3 s)
+    if app.containers.enabled() && app.pairing.live(&r.id) {
+        if let Some((token, name)) = app.containers.redeem(&r.code).await {
+            app.pairing.cancel(&r.id);
+            return Json(json!({ "token": token, "name": name, "fp": app.tls_fp, "container": true })).into_response();
+        }
+    }
     if app.pairing.confirm(&r.id, &r.code) {
         Json(json!({ "token": app.token, "name": hostname(), "fp": app.tls_fp })).into_response()
     } else {
@@ -890,7 +908,10 @@ async fn pair_confirm(State(app): S, headers: HeaderMap, Json(r): Json<PairConfi
 }
 
 async fn pair_pending(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Response {
-    if peer.ip().is_loopback() && direct(&headers) {
+    let token_ok = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).is_some_and(|t| token_eq(t, &app.token));
+    // On a container host a container may share this machine's network and so look like loopback; there the codes (which lead to the
+    // host's token) are shown only to whoever already holds it.
+    if peer.ip().is_loopback() && direct(&headers) && (token_ok || !app.containers.enabled()) {
         Json(app.pairing.pending()).into_response()
     } else {
         StatusCode::FORBIDDEN.into_response()
@@ -928,13 +949,107 @@ async fn term_ws(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>, uri:
     ws.on_upgrade(move |sock| term::attach(reg, sock, id, c, r, sh))
 }
 
+/// The terminal socket authenticates by query (`t=`); a container's token is sent on to that container's agent.
+async fn term_gate(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
+    let t = req.uri().query().unwrap_or("").split('&').find_map(|kv| kv.strip_prefix("t=")).map(str::to_string);
+    let Some(id) = t.as_deref().filter(|t| !token_eq(t, &app.token)).and_then(|t| app.containers.tenant(t)) else { return next.run(req).await };
+    let (clean, ws_sig) = device::split_query(req.uri().query().unwrap_or(""));
+    let pq = if clean.is_empty() { req.uri().path().to_string() } else { format!("{}?{clean}", req.uri().path()) };
+    if let Err(r) = device_gate(&app, req.headers(), Some(peer), "GET", &pq, ws_sig) {
+        return r;
+    }
+    containers::tenant_request(app.clone(), id, req, next).await
+}
+
+async fn not_a_container() -> StatusCode {
+    StatusCode::NOT_FOUND
+}
+
 async fn index() -> Html<&'static str> {
     Html(include_str!("../web/index.html"))
 }
 
-// a control daemon is I/O bound: a few workers are plenty (the default is one per CPU core, 24 threads on a big laptop)
-#[tokio::main(worker_threads = 4)]
-async fn main() {
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+fn main() {
+    // a container's agent must join the container's namespaces while it is still one thread, so before the runtime starts
+    let agent = std::env::args().nth(1).as_deref() == Some("ct-agent");
+    if agent {
+        if let Err(e) = containers::agent_enter(&std::env::args().skip(2).collect::<Vec<_>>()) {
+            eprintln!("container agent: {e}");
+            std::process::exit(1);
+        }
+    }
+    // a control daemon is I/O bound: a few workers are plenty (the default is one per CPU core, 24 threads on a big laptop)
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(if agent { 2 } else { 4 }).enable_all().build().expect("runtime");
+    rt.block_on(if agent { Box::pin(agent_main()) as std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> } else { Box::pin(daemon()) });
+}
+
+/// A container's agent: the machine view of one container (Monitor, processes, Terminal, Files) for the host daemon, on fd 3.
+async fn agent_main() {
+    let token = std::env::var("HOMECTL_AGENT_TOKEN").unwrap_or_default();
+    std::env::remove_var("HOMECTL_AGENT_TOKEN");
+    if token.len() < 32 {
+        return eprintln!("container agent: no token");
+    }
+    let none = PathBuf::from("/nonexistent/homectl");
+    let app = Arc::new(App {
+        token,
+        inbox: none.clone(),
+        port: 0,
+        tunnel: Default::default(),
+        tunnel_task: Mutex::new(None),
+        tunnel_auto: false,
+        tunnel_manual: Default::default(),
+        hub_up: Mutex::new(None),
+        failures: AtomicU32::new(0),
+        peers: relay::Peers::load(none.clone()),
+        devices: device::Devices::load(none.clone()),
+        device_always: Default::default(),
+        tls_fp: String::new(),
+        tls_only: Default::default(),
+        mon: monitor::start(true),
+        sessions: Default::default(),
+        pairing: Default::default(),
+        containers: containers::Containers::off(),
+        agent: true,
+    });
+    let api = Router::new()
+        .route("/endpoints", get(endpoints))
+        .route("/stats", get(stats))
+        .route("/monitor", get(monitor))
+        .route("/glance", get(glance))
+        .route("/procs", get(procs))
+        .route("/procs/{pid}/{sig}", post(proc_signal))
+        .route("/term/sessions", get(term_list))
+        .route("/term/shells", get(term_shells))
+        .route("/term/sessions/{id}", axum::routing::delete(term_kill))
+        .route("/term/sessions/{id}/name", post(term_rename))
+        .route("/fs/list", get(fs::list))
+        .route("/fs/download", get(fs::download))
+        .route("/fs/upload", post(fs::upload))
+        .route("/fs/mkdir", post(fs::mkdir))
+        .route("/fs/thumb", get(fs::thumb))
+        .route("/fs/search", get(fs::search))
+        .route("/fs/usage", get(fs::usage))
+        .route("/fs/stat", get(fs::stat))
+        .route("/fs/hash", get(fs::hash))
+        .route("/fs/delete", post(fs::delete))
+        .route("/fs/rename", post(fs::rename))
+        .route("/fs/write", post(fs::write))
+        .route("/fs/archive/list", get(fs::archive_list))
+        .route("/fs/archive/extract", post(fs::archive_extract))
+        .route("/fs/archive/file", get(fs::archive_file))
+        .layer(axum::extract::DefaultBodyLimit::disable())
+        .layer(middleware::from_fn_with_state(app.clone(), auth))
+        .with_state(app.clone());
+    let open = Router::new().route("/api/ping", get(ping)).route("/api/term", get(term_ws)).with_state(app.clone());
+    containers::agent_serve(open.nest("/api", api)).await;
+}
+
+async fn daemon() {
     // a short-lived helper: measures one folder's size in its own process (see fs::scan) and exits, so the daemon never holds the memory
     // the root side of the Claude Code reader (see claude.rs); started by its own OpenRC service, never by the daemon
     if std::env::args().nth(1).as_deref() == Some("claude-helper") {
@@ -950,6 +1065,9 @@ async fn main() {
     let token = load_token();
     if std::env::args().nth(1).as_deref() == Some("pair") {
         return net::pair(port, &token).await;
+    }
+    if std::env::args().nth(1).as_deref() == Some("containers") {
+        return containers::cli(port, &token, &std::env::args().skip(2).collect::<Vec<_>>()).await;
     }
     let tls = tls::load_or_create(&config_dir()).map_err(|e| eprintln!("encrypted connections unavailable: {e}")).ok();
     let inbox = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join("homectl-inbox");
@@ -976,9 +1094,11 @@ async fn main() {
         device_always: std::sync::atomic::AtomicBool::new(config_dir().join("device-always").exists()),
         tls_fp: tls.as_ref().map(|t| t.fingerprint.clone()).unwrap_or_default(),
         tls_only: std::sync::atomic::AtomicBool::new(config_dir().join("tls-only").exists()),
-        mon: monitor::start(),
+        mon: monitor::start(false),
         sessions: Default::default(),
         pairing: Default::default(),
+        containers: containers::Containers::load(config_dir()),
+        agent: false,
     });
     if tunnel_auto {
         auto_tunnel(app.clone());
@@ -1073,6 +1193,12 @@ async fn main() {
         .route("/hubs", get(hubs_get).post(hubs_set).delete(hubs_clear))
         .route("/peers", get(relay::list).post(relay::upsert))
         .route("/peers/{id}", axum::routing::delete(relay::remove))
+        // a container's own view (answered for its phones in containers::tenant_request); this machine itself isn't one
+        .route("/container", get(not_a_container))
+        .route("/container/{action}", post(not_a_container))
+        .route("/containers", get(containers::list))
+        .route("/containers/owner", post(containers::owner_set))
+        .route("/containers/{id}/{action}", post(containers::action))
         .layer(axum::extract::DefaultBodyLimit::disable())
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         .with_state(app.clone());
@@ -1083,7 +1209,7 @@ async fn main() {
         .route("/api/pair/request", post(pair_request))
         .route("/api/pair/confirm", post(pair_confirm))
         .route("/api/pair/pending", get(pair_pending))
-        .route("/api/term", get(term_ws))
+        .route("/api/term", get(term_ws).route_layer(middleware::from_fn_with_state(app.clone(), term_gate)))
         .route("/peer/{id}/{*rest}", axum::routing::any(relay::proxy).layer(axum::extract::DefaultBodyLimit::disable()))
         .with_state(app.clone());
 

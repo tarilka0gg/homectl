@@ -569,7 +569,9 @@ fn core_id_map(n: usize) -> Vec<u32> {
     (0..n).map(|i| num(&format!("/sys/devices/system/cpu/cpu{i}/topology/core_id")).map_or(i as u32, |c| c as u32)).collect()
 }
 
-pub fn start() -> Monitor {
+/// `restricted` is a container's agent: it reports what the container itself uses, and leaves out the machine's hardware (temperatures,
+/// fans, batteries, GPUs, power, physical disks), which a container's people have no business reading from the host.
+pub fn start(restricted: bool) -> Monitor {
     let shared: Monitor = Arc::new(Shared::default());
     shared.every_ms.store(DEFAULT_EVERY_MS, Ordering::Relaxed);
     shared.last_request_ms.store(now_ms(), Ordering::Relaxed);
@@ -582,14 +584,14 @@ pub fn start() -> Monitor {
             "os": read("/etc/os-release").lines().find_map(|l| l.strip_prefix("PRETTY_NAME=")).unwrap_or("").trim_matches(|c| c == '"' || c == '\''),
         });
         let users = passwd();
-        let mut gpus = find_gpus();
+        let mut gpus = if restricted { vec![] } else { find_gpus() };
         let mut hist = Hist::default();
         let mut extra = crate::sensors::Sensors::new();
         let mut prev_cpu = cpu_times();
         let core_ids = core_id_map(prev_cpu.len().saturating_sub(1));
         let mut prev_net: HashMap<String, (u64, u64)> = net_ifaces().into_iter().map(|i| (i.name, (i.rx, i.tx))).collect();
-        let (mut prev_dr, mut prev_dw) = disk_sectors();
-        let mut prev_dev: HashMap<String, DiskRaw> = disk_devs().into_iter().collect();
+        let (mut prev_dr, mut prev_dw) = if restricted { (0, 0) } else { disk_sectors() };
+        let mut prev_dev: HashMap<String, DiskRaw> = if restricted { HashMap::new() } else { disk_devs().into_iter().collect() };
         let mut prev_pio = proc_io(256);
         let mut dev_info: HashMap<String, Value> = HashMap::new();
         let mut prev_ticks: HashMap<u32, u64> = raw_procs().into_iter().map(|p| (p.pid, p.ticks)).collect();
@@ -647,7 +649,7 @@ pub fn start() -> Monitor {
             rx_peak = rx_peak.max(rxr);
             tx_peak = tx_peak.max(txr);
 
-            let (dr, dw) = disk_sectors();
+            let (dr, dw) = if restricted { (0, 0) } else { disk_sectors() };
             let (drr, dwr) = (dr.saturating_sub(prev_dr) as f64 * 512.0 / dt, dw.saturating_sub(prev_dw) as f64 * 512.0 / dt);
             (prev_dr, prev_dw) = (dr, dw);
             dr_peak = dr_peak.max(drr);
@@ -655,7 +657,7 @@ pub fn start() -> Monitor {
 
             // per physical disk: throughput, IOPS and how busy it is (io_ticks = ms with I/O in flight)
             let mut dev_json = vec![];
-            for (name, c) in disk_devs() {
+            for (name, c) in if restricted { vec![] } else { disk_devs() } {
                 let p = prev_dev.get(&name).copied().unwrap_or(c);
                 let (rb, wb) = (c.sect_r.saturating_sub(p.sect_r) as f64 * 512.0 / dt, c.sect_w.saturating_sub(p.sect_w) as f64 * 512.0 / dt);
                 let (ri, wi) = (c.reads.saturating_sub(p.reads) as f64 / dt, c.writes.saturating_sub(p.writes) as f64 / dt);
@@ -720,7 +722,7 @@ pub fn start() -> Monitor {
             }
 
             // temperatures and fans
-            let hw = hwmons();
+            let hw = if restricted { vec![] } else { hwmons() };
             let mut core_temp_by_id: HashMap<u32, f64> = HashMap::new();
             let mut pkg_temp = None;
             let mut temps = vec![];
@@ -746,15 +748,15 @@ pub fn start() -> Monitor {
                 fans.extend(fans_of(h));
             }
             let core_temps: Vec<Value> = core_ids.iter().map(|id| json!(core_temp_by_id.get(id))).collect();
-            let freqs = cpu_freqs_mhz();
+            let freqs = if restricted { vec![] } else { cpu_freqs_mhz() };
             let (f_avg, f_max) = (if freqs.is_empty() { 0.0 } else { freqs.iter().sum::<f64>() / freqs.len() as f64 }, freqs.iter().cloned().fold(0.0, f64::max));
-            let bat = battery();
+            let bat = if restricted { json!({}) } else { battery() };
             let ac = bat["ac"].as_bool().unwrap_or(true);
             let forced = now_s() < out.gpu_force_until.load(Ordering::Relaxed);
             let gpu_json: Vec<Value> = gpus.iter_mut().map(|g| sample_gpu(g, ac, forced, pkg_temp)).collect();
 
             hist.tick += 1;
-            let ex = extra.sample();
+            let ex = if restricted { serde_json::Map::from_iter([("power".to_string(), Value::Null)]) } else { extra.sample() };
             if let Some(w) = ex["power"]["rapl"].as_array().and_then(|a| a.first()).and_then(|z| z["w"].as_f64()) {
                 hist.push("power.pkg", Some(w));
             }

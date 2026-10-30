@@ -251,12 +251,12 @@ fn hide(ui: &Ui) {
     ui.show.set_label("Show");
 }
 
-/// Lists the phones asking to pair (`/api/pair/pending`, local only, no token: the code is short-lived and the phone must type it).
+/// Lists the phones asking to pair (`/api/pair/pending`, local only; a container host also wants the token, see main.rs).
 fn refresh_pending(ui: &Ui) {
     while let Some(child) = ui.pending.first_child() {
         ui.pending.remove(&child);
     }
-    let Some(list) = pairlink::get(ui.port, "/api/pair/pending", None) else {
+    let Some(list) = pairlink::get(ui.port, "/api/pair/pending", ui.token.as_deref()) else {
         ui.status.set_label(&format!("The homectl daemon does not answer on port {}.", ui.port));
         ui.pending.append(&gtk::Label::new(Some("Not available.")));
         return;

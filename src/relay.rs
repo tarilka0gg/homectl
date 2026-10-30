@@ -103,12 +103,22 @@ pub async fn proxy(State(app): State<Arc<crate::App>>, axum::extract::ConnectInf
         }
     }
     let bearer = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).map(str::to_string);
-    let authed = rest == "api/ping" || [bearer, hub_t].into_iter().flatten().any(|t| crate::token_eq(&t, &app.token));
+    let token_ok = [bearer, hub_t].into_iter().flatten().any(|t| crate::token_eq(&t, &app.token));
+    // a container is only asked anything (its agent started) for the owner, even a ping
+    let authed = token_ok || (rest == "api/ping" && !id.starts_with("ct-"));
+    if !token_ok && rest == "api/ping" && id.starts_with("ct-") {
+        // the app's reachability check carries no token: answered here, naming nothing and starting nothing
+        return Json(json!({"homectl": 1})).into_response();
+    }
     if !authed {
         crate::slow_down(&app).await;
         return StatusCode::UNAUTHORIZED.into_response();
     }
     app.failures.store(0, Ordering::Relaxed);
+    // host mode: the owner reaching one of this machine's containers
+    if let Some(ct) = id.strip_prefix("ct-") {
+        return crate::containers::owner_proxy(app.clone(), ct, &rest, req).await;
+    }
     let Some(peer) = app.peers.get(&id) else { return StatusCode::NOT_FOUND.into_response() };
 
     let upgrade = req.headers().get(header::UPGRADE).is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"));

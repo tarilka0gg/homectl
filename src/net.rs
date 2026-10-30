@@ -150,7 +150,7 @@ pub async fn pair(port: u16, token: &str) {
     let _ = std::process::Command::new("qrencode").args(["-t", "ANSIUTF8", &link]).status();
     // Phones that asked to pair by code appear here (also useful on servers without a desktop).
     if let Ok(mut s2) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
-        s2.write_all(b"GET /api/pair/pending HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.ok();
+        s2.write_all(format!("GET /api/pair/pending HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n").as_bytes()).await.ok();
         let mut b2 = String::new();
         s2.read_to_string(&mut b2).await.ok();
         let pend: Value = serde_json::from_str(b2.split("\r\n\r\n").nth(1).unwrap_or("")).unwrap_or_default();

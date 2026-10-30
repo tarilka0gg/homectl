@@ -75,6 +75,15 @@ impl Pairing {
         false
     }
 
+    /// A request that is still waiting for its code.
+    pub fn live(&self, id: &str) -> bool {
+        self.reqs.lock().unwrap().get(id).is_some_and(|r| r.at.elapsed() < TTL)
+    }
+
+    pub fn cancel(&self, id: &str) {
+        self.reqs.lock().unwrap().remove(id);
+    }
+
     pub fn pending(&self) -> Value {
         let reqs = self.reqs.lock().unwrap();
         json!(reqs

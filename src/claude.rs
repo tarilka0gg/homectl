@@ -100,6 +100,12 @@ pub fn sessions_in(dir: &Path, uid: Option<u32>) -> Vec<Session> {
         });
     }
     out.sort_by_key(|s| s.wrapper);
+    // a session that ended takes its transcript copy with it (up to MAX_ITEMS items each, kept forever before)
+    if let Some(all) = CACHES.get() {
+        if let Ok(mut all) = all.lock() {
+            all.retain(|id, c| !c.path.starts_with(dir) || out.iter().any(|s| &s.id == id));
+        }
+    }
     out
 }
 
@@ -220,7 +226,7 @@ fn take_line(c: &mut Cache, d: &Value) {
                             }
                             "tool_result" => {
                                 let id = p["tool_use_id"].as_str().unwrap_or("").to_string();
-                                let name = c.tools.get(&id).cloned().unwrap_or_default();
+                                let name = c.tools.remove(&id).unwrap_or_default();
                                 let t = cut(result_text(&p["content"]).trim(), MAX_RESULT);
                                 push(c, json!({ "k": "result", "id": id, "name": name, "t": t, "err": p["is_error"] == true }), ts);
                             }

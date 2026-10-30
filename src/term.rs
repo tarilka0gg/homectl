@@ -64,6 +64,14 @@ struct Ring {
 impl Ring {
     fn push_data(&mut self, d: Vec<u8>) {
         self.bytes += d.len();
+        // a shell writes a few bytes at a time (each echoed key): small pieces join the last one, so the ring holds about RING bytes
+        // of output and not a million tiny allocations that each cost more than their bytes
+        if let Some(Chunk::Data(last)) = self.chunks.back_mut() {
+            if last.len() + d.len() <= 4096 {
+                last.extend_from_slice(&d);
+                return;
+            }
+        }
         self.chunks.push_back(Chunk::Data(d));
         while self.bytes > RING {
             match self.chunks.pop_front() {
