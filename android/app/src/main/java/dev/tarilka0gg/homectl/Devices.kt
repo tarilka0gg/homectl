@@ -66,7 +66,7 @@ fun WebcamSection() {
         if (!live) return@LaunchedEffect
         status = ""
         val ok = Hc.cur?.stream("/api/webcam/0/stream") { input, _ ->
-            readMjpeg(input, { live }) { jpg -> BitmapFactory.decodeByteArray(jpg, 0, jpg.size)?.let { frame = it.asImageBitmap() } }
+            readMjpeg(input, { live }) { bmp -> frame = bmp.asImageBitmap() }
         }
         if (ok == null && live) status = "Couldn't start the live view — this machine may need the newer homectl daemon."
         live = false
@@ -331,29 +331,6 @@ fun PowerSection() {
         )
     }
 
-}
-
-/** Reads a multipart motion-JPEG stream: every part has a Content-Length header, a blank line, then that many bytes of JPEG. */
-private fun readMjpeg(input: java.io.InputStream, keepGoing: () -> Boolean, onFrame: (ByteArray) -> Unit) {
-    fun line(): String? {
-        val sb = StringBuilder()
-        while (true) {
-            val b = input.read()
-            if (b < 0) return null
-            if (b == '\n'.code) return sb.toString().trimEnd('\r')
-            if (sb.length < 200) sb.append(b.toChar())
-        }
-    }
-    while (keepGoing()) {
-        var len = -1
-        while (true) {
-            val l = line() ?: return
-            if (l.startsWith("content-length:", ignoreCase = true)) len = l.substringAfter(':').trim().toIntOrNull() ?: -1
-            if (l.isEmpty() && len >= 0) break
-        }
-        if (len <= 0 || len > 8_000_000) return
-        onFrame(input.readNBytes(len).also { if (it.size < len) return })
-    }
 }
 
 /** What this phone has learned about a machine's network cards (for waking it), saved per machine. */

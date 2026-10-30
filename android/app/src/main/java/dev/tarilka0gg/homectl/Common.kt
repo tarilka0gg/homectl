@@ -1,5 +1,6 @@
 package dev.tarilka0gg.homectl
 
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -10,9 +11,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
@@ -133,6 +137,35 @@ fun <T> loaded(key: Any?, everyMs: Long = 0, cacheId: String? = null, fetch: sus
 fun Bar(fraction: Float, color: Color, modifier: Modifier = Modifier, height: Dp = 8.dp) {
     Box(modifier.fillMaxWidth().height(height).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(height))) {
         Box(Modifier.fillMaxWidth(fraction.coerceIn(0f, 1f)).fillMaxHeight().background(color, RoundedCornerShape(height)))
+    }
+}
+
+/** Round meter: an open ring filled to [fraction], with whatever is put in its middle. */
+@Composable
+fun Ring(fraction: Float, color: Color, size: Dp, stroke: Dp = 6.dp, content: @Composable BoxScope.() -> Unit = {}) {
+    val track = MaterialTheme.colorScheme.surfaceVariant
+    val f by animateFloatAsState(fraction.coerceIn(0f, 1f), label = "ring")
+    Box(Modifier.size(size), contentAlignment = Alignment.Center) {
+        Canvas(Modifier.matchParentSize()) {
+            val w = stroke.toPx()
+            val at = Offset(w / 2, w / 2)
+            val box = Size(this.size.width - w, this.size.height - w)
+            drawArc(track, 135f, 270f, false, at, box, style = Stroke(w, cap = StrokeCap.Round))
+            if (f > 0f) drawArc(color, 135f, 270f * f, false, at, box, style = Stroke(w, cap = StrokeCap.Round))
+        }
+        content()
+    }
+}
+
+/** A ring with its value inside and a name under it. */
+@Composable
+fun Gauge(name: String, value: String, fraction: Float, color: Color, size: Dp = 76.dp, sub: String? = null) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Ring(fraction, color, size, if (size < 60.dp) 5.dp else 7.dp) {
+            Text(value, style = if (size < 60.dp) MaterialTheme.typography.labelMedium else MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+        }
+        Text(name, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+        if (sub != null) Text(sub, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
     }
 }
 

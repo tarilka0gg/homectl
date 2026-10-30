@@ -91,6 +91,12 @@ private class WinCard(val j: JSONObject) {
     val cwd = j.str("cwd")
     val cmd = j.str("cmd")
     val isTerminal get() = term.isNotEmpty()
+    /** the Claude Code session running in this terminal, if any */
+    val claude = j.optJSONObject("claude")?.let { ClaudeInfo(it) }
+    /** where the compositor has put the window: screen, visible now, size (niri only) */
+    val place: JSONObject? = j.optJSONObject("place")
+    /** what the filter row groups it under */
+    val group get() = if (claude != null) "claude" else app.ifBlank { "window" }
 }
 
 private object Icons2 {
@@ -143,17 +149,41 @@ fun WindowsScreen() {
         tooOld = code == 404
         j
     }
-    val cards = remember(data) { data?.optJSONArray("windows")?.objs()?.map { WinCard(it) }.orEmpty() }
+    // sessions that need an answer first, then the ones at work, then everything in the compositor's order
+    val cards = remember(data) {
+        data?.optJSONArray("windows")?.objs()?.map { WinCard(it) }.orEmpty()
+            .sortedBy { c -> when { c.claude?.needsYou == true -> 0; c.claude?.working == true -> 1; c.claude != null -> 2; else -> 3 } }
+    }
     var openId by remember { mutableStateOf(Hc.memStr("windows.open").ifBlank { null }) }
-    fun open(id: String?) { openId = id; Hc.memPutStr("windows.open", id.orEmpty()) }
+    // a Claude Code card opens its conversation; this switches it to the raw terminal instead
+    var raw by remember { mutableStateOf(false) }
+    fun open(id: String?) { openId = id; raw = false; Hc.memPutStr("windows.open", id.orEmpty()) }
     var closing by remember { mutableStateOf<WinCard?>(null) }
+    var filter by remember { mutableStateOf(Hc.memStr("windows.filter")) }
 
     val opened = cards.firstOrNull { it.id == openId }
-    if (opened != null && opened.isTerminal) {
-        BackHandler { open(null) }
-        TerminalView(opened) { open(null) }
+    if (opened != null) {
+        val info = opened.claude
+        when {
+            info != null && !raw -> {
+                BackHandler { open(null) }
+                ClaudeView(opened.term, info, onTerminal = { raw = true }, onBack = { open(null) })
+            }
+            opened.isTerminal -> {
+                BackHandler { if (info != null) raw = false else open(null) }
+                TerminalView(opened) { if (info != null) raw = false else open(null) }
+            }
+            else -> {
+                BackHandler { open(null) }
+                WindowView(
+                    opened.id, opened.title, opened.app, opened.place, icon = { AppIcon(opened.app, opened.title, 28) },
+                    onClose = { scope.launch { Hc.post("/api/windows/${opened.id}/close"); open(null) } }, onBack = { open(null) },
+                )
+            }
+        }
         return
     }
+    val shown = cards.filter { filter.isBlank() || it.group == filter }
 
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -164,10 +194,24 @@ fun WindowsScreen() {
                         tooOld -> "needs homectl 0.18.0 or newer on this machine"
                         data == null -> "loading…"
                         cards.isEmpty() -> "nothing open"
-                        else -> "${cards.size} open · ${cards.count { it.isTerminal }} mirrored"
+                        else -> listOfNotNull("${cards.size} open", cards.count { it.claude != null }.takeIf { it > 0 }?.let { "$it Claude Code" },
+                            cards.count { it.claude?.needsYou == true }.takeIf { it > 0 }?.let { "$it waiting for you" }).joinToString(" · ")
                     },
                     style = MaterialTheme.typography.bodySmall,
                 )
+            }
+        }
+        // one chip per kind of window, with its icon and how many are open; tap to show only those
+        if (cards.size > 1) {
+            val groups = cards.groupBy { it.group }
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FilterChip(filter.isBlank(), { filter = ""; Hc.memPutStr("windows.filter", "") }, label = { Text("All ${cards.size}") })
+                groups.forEach { (g, list) ->
+                    val c = list.first()
+                    FilterChip(filter == g, { filter = if (filter == g) "" else g; Hc.memPutStr("windows.filter", filter) },
+                        leadingIcon = { if (g == "claude") ClaudeMark(18) else AppIcon(c.app, c.title, 18) },
+                        label = { Text("${appLabel(g)} ${list.size}") })
+                }
             }
         }
         if (tooOld) {
@@ -184,7 +228,7 @@ fun WindowsScreen() {
             }
         }
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(cards, key = { it.id }) { c ->
+            items(shown, key = { it.id }) { c ->
                 WindowCard(
                     c, Modifier.animateItem(),
                     onOpen = { open(c.id) },
@@ -226,15 +270,22 @@ private fun WindowCard(c: WinCard, modifier: Modifier, onOpen: () -> Unit, onFoc
     }
     var menu by remember { mutableStateOf(false) }
     Card(
-        modifier.fillMaxWidth().border(2.dp, ring, RoundedCornerShape(14.dp)).then(if (c.isTerminal) Modifier.clickable(onClick = onOpen) else Modifier),
+        modifier.fillMaxWidth().border(2.dp, ring, RoundedCornerShape(14.dp)).clickable(onClick = onOpen),
         shape = RoundedCornerShape(14.dp),
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            AppIcon(c.app, c.title)
+            val cl = c.claude
+            if (cl != null) ClaudeMark() else AppIcon(c.app, c.title)
             Column(Modifier.weight(1f)) {
-                Text(c.title.ifBlank { c.app.ifBlank { "window" } }, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(
-                    listOfNotNull(c.app.takeIf { it.isNotBlank() && it != "terminal" }, c.cwd.takeIf { it.isNotBlank() }?.let { shortPath(it) }, c.workspace.takeIf { it.isNotBlank() }?.let { "workspace $it" }, if (c.isTerminal) "mirrored" else null).joinToString(" · "),
+                Text(cl?.name?.ifBlank { null } ?: c.title.ifBlank { c.app.ifBlank { "window" } }, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (cl != null) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    StatusDot(cl)
+                    Text(listOfNotNull(claudeStatus(cl), c.cwd.takeIf { it.isNotBlank() }?.let { shortPath(it) }).joinToString(" · "),
+                        style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (cl.needsYou) ClaudeOrange else Color.Unspecified)
+                }
+                else Text(
+                    listOfNotNull(appLabel(c.app).takeIf { c.app.isNotBlank() && c.app != "terminal" }, c.cwd.takeIf { it.isNotBlank() }?.let { shortPath(it) },
+                        c.place?.let { p -> if (p.optBoolean("visible")) "on ${p.str("output")}" else "hidden workspace" }, if (c.isTerminal) "mirrored" else null).joinToString(" · "),
                     style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
@@ -247,7 +298,16 @@ private fun WindowCard(c: WinCard, modifier: Modifier, onOpen: () -> Unit, onFoc
                 }
             }
         }
-        if (c.isTerminal && c.preview.isNotEmpty()) {
+        val cl = c.claude
+        if (cl != null) {
+            if (cl.last.isNotBlank()) Text(
+                (if (cl.lastFromUser) "You: " else "") + plainPreview(cl.last),
+                Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 3, overflow = TextOverflow.Ellipsis,
+            )
+        } else if (!c.isTerminal && c.place?.optBoolean("visible") == true && c.place.optBoolean("active")) {
+            Thumbnail(c)
+        } else if (c.isTerminal && c.preview.isNotEmpty()) {
             val tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.22f * flash)
             Column(
                 Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp).clip(RoundedCornerShape(8.dp))
@@ -261,6 +321,29 @@ private fun WindowCard(c: WinCard, modifier: Modifier, onOpen: () -> Unit, onFoc
 }
 
 private fun shortPath(p: String) = p.replace(Regex("^/home/[^/]+"), "~")
+
+/** A message as one line of plain text: no code fences, emphasis marks or list bullets. */
+private fun plainPreview(t: String) = t.replace("```", " ").replace("**", "").replace("`", "").lines()
+    .joinToString(" ") { it.trim().removePrefix("- ").removePrefix("* ").removePrefix("# ") }.replace(Regex("\\s+"), " ").trim()
+
+/** A short name for an app id: "com.mitchellh.ghostty" -> "ghostty". */
+private fun appLabel(app: String) = when (app) { "claude" -> "Claude"; "" -> "window"; else -> app.substringAfterLast('.') }
+
+/** A small picture of a window that is on a screen right now, refreshed every few seconds while the list is open. */
+@Composable
+private fun Thumbnail(c: WinCard) {
+    val out = c.place?.str("output").orEmpty()
+    val rect = c.place?.optJSONArray("rect")?.let { a -> if (a.length() == 4) (0 until 4).joinToString(",") { a.optDouble(it).toString() } else null }
+    var img by remember(c.id) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(c.id, out, rect) {
+        while (out.isNotEmpty()) {
+            val b = Hc.cur?.bytes("/api/screens/${android.net.Uri.encode(out)}/frame?w=560&q=60" + (rect?.let { "&crop=$it" } ?: ""), 2_000_000)
+            b?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }?.let { img = it.asImageBitmap() }
+            delay(8000)
+        }
+    }
+    img?.let { Image(it, "What the window shows", Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp).heightIn(max = 220.dp).clip(RoundedCornerShape(8.dp)), contentScale = androidx.compose.ui.layout.ContentScale.Fit) }
+}
 
 // ---- the live terminal ----
 
@@ -401,7 +484,7 @@ private fun TerminalView(c: WinCard, onBack: () -> Unit) {
     // the bottom dock slides away while the keyboard is up and comes back when it closes
     val imeUp = Hc.imeUp
     LaunchedEffect(imeUp) { Hc.dockHidden = imeUp }
-    DisposableEffect(Unit) { onDispose { Hc.dockHidden = false } }
+    DisposableEffect(Unit) { Hc.fullView = true; onDispose { Hc.dockHidden = false; Hc.fullView = false } }
 
     /** Everything typed or pressed goes through here, so Ctrl and Alt apply to the next key whichever way it came. */
     val emitRef = remember { mutableStateOf<(String) -> Unit>({}) }

@@ -498,6 +498,8 @@ object Hc {
     var speedMs by mutableIntStateOf(1000)
     /** Monitor CPU section: one small graph per core instead of bars. */
     var perCoreGraphs by mutableStateOf(false)
+    /** Monitor drawn with round meters instead of bars. */
+    var circleLook by mutableStateOf(false)
     /** When turning a monitor off, also disable its output in the compositor so the GPU can sleep. */
     var compositorOff by mutableStateOf(true)
     fun updateCompositorOff(v: Boolean) { compositorOff = v; prefs.edit().putBoolean("compoff", v).apply() }
@@ -531,12 +533,19 @@ object Hc {
     /** True while the terminal view's keyboard is up: the bottom dock slides away and comes back when it closes. */
     var dockHidden by mutableStateOf(false)
 
+    /** True while something opened from the Windows tab fills the screen: the top bar, the dock and the phone's own bars hide. */
+    var fullView by mutableStateOf(false)
+
+    /** True while a window is shown as video: like [fullView], and the picture also runs under the camera cut-out. */
+    var videoView by mutableStateOf(false)
+
     /** True while the soft keyboard is up (measured from the visible window area, which works however the keyboard was closed). */
     var imeUp by mutableStateOf(false)
     var lastTab by mutableIntStateOf(0)
 
     fun setSpeed(ms: Int) { speedMs = ms; prefs.edit().putInt("speed", ms).apply() }
     fun setPerCore(v: Boolean) { perCoreGraphs = v; prefs.edit().putBoolean("percore", v).apply() }
+    fun updateCircleLook(v: Boolean) { circleLook = v; prefs.edit().putBoolean("circles", v).apply() }
     // ---- what the screens remember (where you were), kept across leaving the app ----
     fun memInt(k: String, def: Int = 0) = if (::prefs.isInitialized) prefs.getInt("m.$k", def) else def
     fun memPutInt(k: String, v: Int) { if (::prefs.isInitialized) prefs.edit().putInt("m.$k", v).apply() }
@@ -573,6 +582,7 @@ object Hc {
         selectedId = prefs.getString("selected", "") ?: ""
         speedMs = prefs.getInt("speed", 1000)
         perCoreGraphs = prefs.getBoolean("percore", false)
+        circleLook = prefs.getBoolean("circles", false)
         compositorOff = prefs.getBoolean("compoff", true)
         lastTab = prefs.getInt("tab", 0)
         Keyring.init(ctx)

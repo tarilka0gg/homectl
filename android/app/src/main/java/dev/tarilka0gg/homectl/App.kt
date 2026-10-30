@@ -29,8 +29,8 @@ import org.json.JSONObject
 private enum class Tab(val label: String, val icon: ImageVector) {
     Monitor("Monitor", Icons.Default.Info),
     Controls("Controls", Icons.Default.Settings),
-    Terminal("Terminal", Icons.Default.PlayArrow),
     Network("Network", Icons.Default.Share),
+    Terminal("Terminal", Icons.Default.PlayArrow),
     Devices("Devices", Icons.Default.Home),
     Windows("Windows", WindowsIcon),
     Files("Files", Icons.Default.Menu),
@@ -61,6 +61,14 @@ fun App() {
     }
     var menu by remember { mutableStateOf(false) }
     val m = Hc.cur!!
+    LaunchedEffect(Hc.fullView) {
+        val w = Hc.activity?.window ?: return@LaunchedEffect
+        val c = androidx.core.view.WindowCompat.getInsetsController(w, w.decorView)
+        val bars = androidx.core.view.WindowInsetsCompat.Type.systemBars()
+        // a swipe from the edge shows them for a moment
+        c.systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        if (Hc.fullView) c.hide(bars) else c.show(bars)
+    }
     val ctxApp = LocalContext.current
     LaunchedEffect(Unit) { PhoneClips.listen(ctxApp) }
     LaunchedEffect(Unit) { ClipService.ensure(ctxApp) }
@@ -76,7 +84,7 @@ fun App() {
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            Row(Modifier.fillMaxWidth().statusBarsPadding().height(32.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (!Hc.fullView) Row(Modifier.fillMaxWidth().statusBarsPadding().height(32.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Box {
                         // a plain row, not a text button: the button's 40 dp minimum height would cut the name in the 32 dp bar
                         Row(Modifier.height(32.dp).clickable { menu = true }.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -105,7 +113,7 @@ fun App() {
         },
         bottomBar = {
             androidx.compose.animation.AnimatedVisibility(
-                !Hc.dockHidden,
+                !Hc.dockHidden && !Hc.fullView,
                 enter = androidx.compose.animation.slideInVertically(androidx.compose.animation.core.tween(240)) { it } + androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(240)),
                 exit = androidx.compose.animation.slideOutVertically(androidx.compose.animation.core.tween(240)) { it } + androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(240)),
             ) {
@@ -142,7 +150,9 @@ fun App() {
         },
     ) { pad ->
         if (tab == Tab.Terminal || tab == Tab.Files || tab == Tab.Windows) {
-            Box(Modifier.padding(pad).fillMaxSize()) { when (tab) { Tab.Terminal -> TerminalScreen(); Tab.Windows -> WindowsScreen(); else -> FilesScreen() } }
+            // full screen: the camera cut-out is still kept clear (except under a video, which is letterboxed anyway)
+            val cut = if (Hc.fullView && !Hc.videoView) Modifier.windowInsetsPadding(WindowInsets.displayCutout) else Modifier
+            Box(Modifier.padding(pad).then(cut).fillMaxSize()) { when (tab) { Tab.Terminal -> TerminalScreen(); Tab.Windows -> WindowsScreen(); else -> FilesScreen() } }
         } else {
             Column(Modifier.padding(pad).fillMaxSize().verticalScroll(scrolls.getValue(tab)).padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 when (tab) {

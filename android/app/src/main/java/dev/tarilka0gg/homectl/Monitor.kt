@@ -114,6 +114,11 @@ fun MonitorScreen() {
                 AssistChip({}, label = { Text("🔋 ${b.optInt("percent")}% ${b.str("status")}${if (!b.isNull("watts")) " ${"%.1f".format(b.getDouble("watts"))} W" else ""}") })
             }
         }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(!Hc.circleLook, { Hc.updateCircleLook(false) }, label = { Text("Bars") })
+            FilterChip(Hc.circleLook, { Hc.updateCircleLook(true) }, label = { Text("Circles") })
+        }
+        if (Hc.circleLook) Overview(d)
     }
 
     // ---- CPU ----
@@ -126,11 +131,18 @@ fun MonitorScreen() {
     }) {
         Chart(listOf(hist.series("cpu")), listOf(primary), { "%.0f%%".format(it) }, max = 100f)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(!Hc.perCoreGraphs, { Hc.setPerCore(false) }, label = { Text("Bars") })
+            FilterChip(!Hc.perCoreGraphs, { Hc.setPerCore(false) }, label = { Text(if (Hc.circleLook) "Circles" else "Bars") })
             FilterChip(Hc.perCoreGraphs, { Hc.setPerCore(true) }, label = { Text("Graph per core") })
         }
         if (Hc.perCoreGraphs && hist.cores.isNotEmpty()) {
             CoreGrid(hist.cores, cores, (0 until cores.size).map { i -> coreTemps?.let { if (i < it.length() && !it.isNull(i)) it.getDouble(i) else null } })
+        } else if (Hc.circleLook) {
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                cores.forEachIndexed { i, p ->
+                    val t = coreTemps?.let { if (i < it.length() && !it.isNull(i)) it.getDouble(i) else null }
+                    Box(Modifier.padding(horizontal = 2.dp)) { Gauge("core $i", "${p.toInt()}%", p / 100f, heat(p), 52.dp, t?.let { "${it.toInt()}°" }) }
+                }
+            }
         } else cores.withIndex().chunked(2).forEach { pair ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 pair.forEach { (i, p) ->
@@ -162,9 +174,15 @@ fun MonitorScreen() {
     val swapT = mem.getDouble("swap_total")
     Section("Memory  ${"%.0f".format(100 * used / mt)}%", trailing = { Text("${fmtBytes(used)} / ${fmtBytes(mt)}", style = MaterialTheme.typography.labelLarge) }) {
         Chart(listOf(hist.series("mem")), listOf(tertiary), { "%.0f%%".format(it) }, max = 100f)
-        Bar((used / mt).toFloat(), heat((100 * used / mt).toFloat()))
+        if (Hc.circleLook) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+            Gauge("RAM", "${"%.0f".format(100 * used / mt)}%", (used / mt).toFloat(), heat((100 * used / mt).toFloat()), sub = fmtBytes(used))
+            if (swapT > 0) {
+                val su = swapT - mem.getDouble("swap_free")
+                Gauge("Swap", "${"%.0f".format(100 * su / swapT)}%", (su / swapT).toFloat(), heat((100 * su / swapT).toFloat()), sub = fmtBytes(su))
+            }
+        } else Bar((used / mt).toFloat(), heat((100 * used / mt).toFloat()))
         Text("cached ${fmtBytes(mem.getDouble("cached"))} · buffers ${fmtBytes(mem.optDouble("buffers"))}", style = MaterialTheme.typography.bodySmall)
-        if (swapT > 0) {
+        if (swapT > 0 && !Hc.circleLook) {
             val su = swapT - mem.getDouble("swap_free")
             Text("swap ${fmtBytes(su)} / ${fmtBytes(swapT)}", style = MaterialTheme.typography.bodySmall)
             Bar((su / swapT).toFloat(), heat((100 * su / swapT).toFloat()), height = 5.dp)
@@ -241,6 +259,23 @@ fun MonitorScreen() {
     Processes(d.optJSONObject("procs")?.optInt("count") ?: 0, scope)
 }
 
+/** The circle look's summary: the few numbers you glance at, as big rings. */
+@Composable
+private fun Overview(d: JSONObject) {
+    val cpu = d.getJSONObject("cpu")
+    val mem = d.optJSONObject("mem") ?: JSONObject()
+    val gpu = d.optJSONArray("gpus")?.objs().orEmpty().firstOrNull { !it.isNull("util") }
+    Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+        cpu.getDouble("total").toFloat().let { p -> Gauge("CPU", "${p.toInt()}%", p / 100f, heat(p)) }
+        if (mem.has("total")) {
+            val p = (100 * (1 - mem.getDouble("available") / mem.getDouble("total"))).toFloat()
+            Gauge("Memory", "${p.toInt()}%", p / 100f, heat(p))
+        }
+        gpu?.getDouble("util")?.toFloat()?.let { p -> Gauge("GPU", "${p.toInt()}%", p / 100f, heat(p)) }
+        if (!cpu.isNull("temp")) cpu.getDouble("temp").let { t -> Gauge("CPU temp", "${t.toInt()}°", (t / 100).toFloat(), heat(((t - 30) * 100 / 70).toFloat())) }
+    }
+}
+
 @Composable
 private fun GpuCard(g: JSONObject, hist: HistView) {
     val id = g.str("id")
@@ -257,6 +292,15 @@ private fun GpuCard(g: JSONObject, hist: HistView) {
                 SwitchRow("Read it anyway (may stop it sleeping)", Hc.gpuLive) { Hc.gpuLive = it }
             }
         }
+        if (Hc.circleLook && (!g.isNull("util") || (!g.isNull("mem_total") && !g.optBoolean("shared_memory")))) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+            if (!g.isNull("util")) g.getDouble("util").toFloat().let { u -> Gauge("Load", "${u.toInt()}%", u / 100f, heat(u)) }
+            if (!g.isNull("mem_total") && !g.optBoolean("shared_memory")) {
+                val u = g.optDouble("mem_used")
+                val t = g.getDouble("mem_total")
+                Gauge("VRAM", "${"%.0f".format(100 * u / t)}%", (u / t).toFloat(), heat((100 * u / t).toFloat()), sub = fmtBytes(u))
+            }
+            if (!g.isNull("temp")) g.getDouble("temp").let { t -> Gauge("Temp", "${t.toInt()}°", (t / 100).toFloat(), heat(((t - 30) * 100 / 70).toFloat())) }
+        }
         if (!g.isNull("util")) {
             Text("Load ${"%.0f".format(g.getDouble("util"))}%", style = MaterialTheme.typography.titleSmall)
             Chart(listOf(hist.series("$id.util")), listOf(c), { "%.0f%%".format(it) }, max = 100f, height = 48.dp)
@@ -270,7 +314,7 @@ private fun GpuCard(g: JSONObject, hist: HistView) {
                 Text("VRAM", style = MaterialTheme.typography.bodyMedium)
                 Text("${fmtBytes(u)} / ${fmtBytes(t)}", style = MaterialTheme.typography.labelMedium)
             }
-            Bar((u / t).toFloat(), heat((100 * u / t).toFloat()))
+            if (!Hc.circleLook) Bar((u / t).toFloat(), heat((100 * u / t).toFloat()))
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (!g.isNull("clock_mhz")) AssistChip({}, label = { Text("core ${"%.0f".format(g.getDouble("clock_mhz"))}${if (!g.isNull("clock_max_mhz")) " / ${"%.0f".format(g.getDouble("clock_max_mhz"))}" else ""} MHz") })
